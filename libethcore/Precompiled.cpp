@@ -20,12 +20,20 @@
  */
 
 #include "Precompiled.h"
+#include "libdevcrypto/Blake2.h"
+#include "libdevcrypto/ECDSASignature.h"
+#include "libdevcrypto/LibFF.h"
+#include "libdevcrypto/SM2Signature.h"
+#include "libdevcrypto/SM3Hash.h"
+#include <libconfig/GlobalConfigure.h>
 #include <libdevcrypto/Common.h>
 #include <libdevcrypto/Hash.h>
 #include <libethcore/Common.h>
+
 using namespace std;
 using namespace dev;
 using namespace dev::eth;
+using namespace dev::crypto;
 
 PrecompiledRegistrar* PrecompiledRegistrar::s_this = nullptr;
 
@@ -47,11 +55,38 @@ namespace
 {
 ETH_REGISTER_PRECOMPILED(ecrecover)(bytesConstRef _in)
 {
-    return SignatureStruct::ecRecover(_in);
+    // When supported_version> = v2.4.0, ecRecover uniformly calls the ECDSA verification function
+    if (g_BCOSConfig.version() >= V2_4_0)
+    {
+        return dev::ecRecover(_in);
+    }
+    // before 2.4.0, in sm crypto mode this use sm2 recover which is a bug
+    if (g_BCOSConfig.SMCrypto())
+    {
+        return recover(_in);
+    }
+    else
+    {
+        return dev::ecRecover(_in);
+    }
 }
+
 ETH_REGISTER_PRECOMPILED(sha256)(bytesConstRef _in)
 {
-    return {true, dev::sha256(_in).asBytes()};
+    // When supported_version> = v2.4.0, sha256 uniformly calls the secp sha256 function
+    if (g_BCOSConfig.version() >= V2_4_0)
+    {
+        return {true, dev::sha256(_in).asBytes()};
+    }
+    // before 2.4.0, in sm crypto mode this use sm3 which is a bug
+    if (g_BCOSConfig.SMCrypto())
+    {
+        return {true, dev::sm3(_in).asBytes()};
+    }
+    else
+    {
+        return {true, dev::sha256(_in).asBytes()};
+    }
 }
 
 ETH_REGISTER_PRECOMPILED(ripemd160)(bytesConstRef _in)
@@ -154,6 +189,65 @@ ETH_REGISTER_PRECOMPILED_PRICER(modexp)(bytesConstRef _in)
     bigint const adjustedExpLength(expLengthAdjust(baseLength + 96, expLength, _in));
 
     return multComplexity(maxLength) * max<bigint>(adjustedExpLength, 1) / 20;
+}
+
+ETH_REGISTER_PRECOMPILED(alt_bn128_G1_add)(bytesConstRef _in)
+{
+    return dev::crypto::alt_bn128_G1_add(_in);
+}
+
+ETH_REGISTER_PRECOMPILED(alt_bn128_G1_mul)(bytesConstRef _in)
+{
+    return dev::crypto::alt_bn128_G1_mul(_in);
+}
+
+ETH_REGISTER_PRECOMPILED(alt_bn128_pairing_product)(bytesConstRef _in)
+{
+    return dev::crypto::alt_bn128_pairing_product(_in);
+}
+
+ETH_REGISTER_PRECOMPILED_PRICER(alt_bn128_pairing_product)
+(bytesConstRef _in)
+{
+    auto const k = _in.size() / 192;
+    return 45000 + k * 34000;
+}
+
+ETH_REGISTER_PRECOMPILED(blake2_compression)(bytesConstRef _in)
+{
+    static constexpr size_t roundsSize = 4;
+    static constexpr size_t stateVectorSize = 8 * 8;
+    static constexpr size_t messageBlockSize = 16 * 8;
+    static constexpr size_t offsetCounterSize = 8;
+    static constexpr size_t finalBlockIndicatorSize = 1;
+    static constexpr size_t totalInputSize = roundsSize + stateVectorSize + messageBlockSize +
+                                             2 * offsetCounterSize + finalBlockIndicatorSize;
+
+    if (_in.size() != totalInputSize)
+        return {false, {}};
+
+    auto const rounds = fromBigEndian<uint32_t>(_in.cropped(0, roundsSize));
+    auto const stateVector = _in.cropped(roundsSize, stateVectorSize);
+    auto const messageBlockVector = _in.cropped(roundsSize + stateVectorSize, messageBlockSize);
+    auto const offsetCounter0 =
+        _in.cropped(roundsSize + stateVectorSize + messageBlockSize, offsetCounterSize);
+    auto const offsetCounter1 = _in.cropped(
+        roundsSize + stateVectorSize + messageBlockSize + offsetCounterSize, offsetCounterSize);
+    uint8_t const finalBlockIndicator =
+        _in[roundsSize + stateVectorSize + messageBlockSize + 2 * offsetCounterSize];
+
+    if (finalBlockIndicator != 0 && finalBlockIndicator != 1)
+        return {false, {}};
+
+    return {true, dev::crypto::blake2FCompression(rounds, stateVector, offsetCounter0,
+                      offsetCounter1, finalBlockIndicator, messageBlockVector)};
+}
+
+ETH_REGISTER_PRECOMPILED_PRICER(blake2_compression)
+(bytesConstRef _in)
+{
+    auto const rounds = fromBigEndian<uint32_t>(_in.cropped(0, 4));
+    return rounds;
 }
 
 }  // namespace

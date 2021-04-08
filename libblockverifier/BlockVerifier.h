@@ -23,7 +23,7 @@
 #include "BlockVerifierInterface.h"
 #include "ExecutiveContext.h"
 #include "ExecutiveContextFactory.h"
-#include "Precompiled.h"
+#include "libprecompiled/Precompiled.h"
 #include <libdevcore/FixedHash.h>
 #include <libdevcore/ThreadPool.h>
 #include <libdevcrypto/Common.h>
@@ -31,8 +31,6 @@
 #include <libethcore/Protocol.h>
 #include <libethcore/Transaction.h>
 #include <libethcore/TransactionReceipt.h>
-#include <libevm/ExtVMFace.h>
-#include <libexecutive/ExecutionResult.h>
 #include <libexecutive/Executive.h>
 #include <libmptstate/State.h>
 #include <boost/function.hpp>
@@ -48,11 +46,6 @@ class TransactionReceipt;
 
 }  // namespace eth
 
-namespace executive
-{
-struct ExecutionResult;
-}
-
 namespace blockverifier
 {
 class BlockVerifier : public BlockVerifierInterface,
@@ -65,8 +58,7 @@ public:
     {
         if (_enableParallel)
         {
-            // m_threadNum = std::max(std::thread::hardware_concurrency(), (unsigned int)1);
-            m_threadNum = 8;
+            m_threadNum = std::max(std::thread::hardware_concurrency(), (unsigned int)1);
         }
     }
 
@@ -81,16 +73,9 @@ public:
 
     dev::eth::TransactionReceipt::Ptr executeTransaction(
         const dev::eth::BlockHeader& blockHeader, dev::eth::Transaction::Ptr _t);
-#if 0
-    std::pair<dev::executive::ExecutionResult, dev::eth::TransactionReceipt::Ptr> execute(
-        dev::eth::EnvInfo const& _envInfo, dev::eth::Transaction const& _t,
-        dev::eth::OnOpFunc const& _onOp,
-        dev::blockverifier::ExecutiveContext::Ptr executiveContext);
-#endif
-
 
     dev::eth::TransactionReceipt::Ptr execute(dev::eth::Transaction::Ptr _t,
-        dev::eth::OnOpFunc const& _onOp, dev::blockverifier::ExecutiveContext::Ptr executiveContext,
+        dev::blockverifier::ExecutiveContext::Ptr executiveContext,
         dev::executive::Executive::Ptr executive);
 
 
@@ -104,6 +89,10 @@ public:
         m_pNumberHash = _pNumberHash;
     }
 
+    dev::executive::Executive::Ptr createAndInitExecutive(
+        std::shared_ptr<executive::StateFace> _s, dev::executive::EnvInfo const& _envInfo);
+    void setEvmFlags(VMFlagType const& _evmFlags) { m_evmFlags = _evmFlags; }
+
 private:
     ExecutiveContextFactory::Ptr m_executiveContextFactory;
     NumberHashCallBackFunction m_pNumberHash;
@@ -112,6 +101,8 @@ private:
 
     std::mutex m_executingMutex;
     std::atomic<int64_t> m_executingNumber = {0};
+
+    VMFlagType m_evmFlags = 0;
 };
 
 }  // namespace blockverifier

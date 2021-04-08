@@ -79,6 +79,9 @@ class session : public std::enable_shared_from_this<session>
             "getClientVersion", std::bind(&dev::rpc::RpcFace::getClientVersionI, m_rpcFace,
                                     std::placeholders::_1, std::placeholders::_2)));
         m_mapRpc.insert(
+            std::make_pair("getNodeInfo", std::bind(&dev::rpc::RpcFace::getNodeInfoI, m_rpcFace,
+                                              std::placeholders::_1, std::placeholders::_2)));
+        m_mapRpc.insert(
             std::make_pair("getPeers", std::bind(&dev::rpc::RpcFace::getPeersI, m_rpcFace,
                                            std::placeholders::_1, std::placeholders::_2)));
         m_mapRpc.insert(
@@ -133,14 +136,15 @@ public:
 
         auto secureInitializer = initialize->secureInitializer();
         dev::KeyPair key_pair = secureInitializer->keyPair();
+        auto ledgerInitializer = initialize->ledgerInitializer();
         auto ledgerManager = initialize->ledgerInitializer()->ledgerManager();
 
         auto p2pInitializer = initialize->p2pInitializer();
         auto p2pService = p2pInitializer->p2pService();
 
-        // auto rpc = new dev::rpc::Rpc(ledgerManager, p2pService);
+        // auto rpc = new dev::rpc::Rpc(ledgerInitializer, p2pService);
 
-        m_rpcFace = std::make_shared<dev::rpc::Rpc>(ledgerManager, p2pService);
+        m_rpcFace = std::make_shared<dev::rpc::Rpc>(ledgerInitializer, p2pService);
 
         setMapRpc();
     }
@@ -208,7 +212,7 @@ public:
 
             Json::Value request;
             if (requestJson["params"].size() < 1 && method != "getPeers" &&
-                method != "getGroupList" && method != "getClientVersion")
+                method != "getGroupList" && method != "getClientVersion" && method != "getNodeInfo")
                 BOOST_THROW_EXCEPTION(jsonrpc::JsonRpcException(-32602));
             for (auto param : requestJson["params"])
                 request.append(param);

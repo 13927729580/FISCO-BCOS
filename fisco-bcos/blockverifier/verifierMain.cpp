@@ -58,8 +58,16 @@ int main(int argc, char* argv[])
 
     auto blockChain = std::make_shared<dev::blockchain::BlockChainImp>();
     blockChain->setStateStorage(storage);
-    dev::blockchain::GenesisBlockParam initParam = {
-        "std", dev::h512s(), dev::h512s(), "", "", "", 1000, 300000000, 0};
+    auto initParam = std::make_shared<dev::ledger::LedgerParam>();
+    initParam->mutableGenesisMark() = "std";
+    initParam->mutableConsensusParam().sealerList = dev::h512s();
+    initParam->mutableConsensusParam().observerList = dev::h512s();
+    initParam->mutableConsensusParam().consensusType = "";
+    initParam->mutableStorageParam().type = "";
+    initParam->mutableStateParam().type = "";
+    initParam->mutableConsensusParam().maxTransactions = 1000;
+    initParam->mutableTxParam().txGasLimit = 300000000;
+    initParam->mutableGenesisParam().timeStamp = 0;
     blockChain->checkAndBuildGenesisBlock(initParam);
 
     auto stateFactory = std::make_shared<dev::storagestate::StorageStateFactory>(dev::u256(0));
@@ -309,13 +317,6 @@ int main(int argc, char* argv[])
                 "f");
             dev::eth::Transaction::Ptr tx = std::make_shared<dev::eth::Transaction>(
                 ref(rlpBytes), dev::eth::CheckTransaction::Everything);
-            // dev::KeyPair key_pair(dev::Secret::random());
-            // dev::Secret sec = key_pair.secret();
-            // u256 maxBlockLimit = u256(1000);
-            // tx.setNonce(tx.nonce() + u256(1));
-            // tx.setBlockLimit(u256(blockChain->number()) + maxBlockLimit);
-            // dev::Signature sig = sign(sec, tx.sha3(dev::eth::WithoutSignature));
-            // tx.updateSignature(SignatureStruct(sig));
             LOG(INFO) << "Tx " << *tx;
 
             dev::eth::Transaction::Ptr tx2 = std::make_shared<dev::eth::Transaction>(
@@ -329,9 +330,9 @@ int main(int argc, char* argv[])
             auto context = blockVerifier->executeBlock(*block, parentBlockInfo);
             blockChain->commitBlock(block, context);
             dev::eth::TransactionReceipt::Ptr receipt =
-                blockChain->getTransactionReceiptByHash(tx->sha3());
+                blockChain->getTransactionReceiptByHash(tx->hash());
             LOG(INFO) << "receipt " << *receipt;
-            receipt = blockChain->getTransactionReceiptByHash(tx2->sha3());
+            receipt = blockChain->getTransactionReceiptByHash(tx2->hash());
             LOG(INFO) << "receipt2 " << *receipt;
         }
     }

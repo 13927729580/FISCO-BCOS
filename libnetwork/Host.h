@@ -120,8 +120,14 @@ public:
 
     virtual void setWhitelist(dev::PeerWhitelist::Ptr _whitelist) { m_whitelist = _whitelist; }
     virtual dev::PeerWhitelist::Ptr whitelist() { return m_whitelist; }
+    virtual NodeInfo nodeInfo();
+
 
 private:
+    /// obtain the common name from the subject:
+    /// the subject format is: /CN=xx/O=xxx/OU=xxx/ commonly
+    std::string obtainCommonNameFromSubject(std::string const& subject);
+
     /// called by 'startedWorking' to accept connections
     void startAccept(boost::system::error_code ec = boost::system::error_code());
     /// functions called after openssl handshake,
@@ -129,10 +135,6 @@ private:
     /// @return: node id of the connected peer
     std::function<bool(bool, boost::asio::ssl::verify_context&)> newVerifyCallback(
         std::shared_ptr<std::string> nodeIDOut);
-
-    /// obtain the common name from the subject:
-    /// the subject format is: /CN=xx/O=xxx/OU=xxx/ commonly
-    std::string obtainCommonNameFromSubject(std::string const& subject);
 
     /// obtain nodeInfo from given vector
     void obtainNodeInfo(NodeInfo& info, std::string const& node_info);
@@ -156,15 +158,15 @@ private:
     void erasePendingConns(NodeIPEndpoint const& _nodeIPEndpoint)
     {
         Guard l(x_pendingConns);
-        if (m_pendingConns.count(_nodeIPEndpoint.name()))
-            m_pendingConns.erase(_nodeIPEndpoint.name());
+        if (m_pendingConns.count(_nodeIPEndpoint))
+            m_pendingConns.erase(_nodeIPEndpoint);
     }
 
     void insertPendingConns(NodeIPEndpoint const& _nodeIPEndpoint)
     {
         Guard l(x_pendingConns);
-        if (!m_pendingConns.count(_nodeIPEndpoint.name()))
-            m_pendingConns.insert(_nodeIPEndpoint.name());
+        if (!m_pendingConns.count(_nodeIPEndpoint))
+            m_pendingConns.insert(_nodeIPEndpoint);
     }
 
     std::shared_ptr<dev::ThreadPool> m_threadPool;
@@ -173,7 +175,7 @@ private:
     std::shared_ptr<ASIOInterface> m_asioInterface;
     std::shared_ptr<SessionFactory> m_sessionFactory;
     int m_connectTimeThre = 50000;
-    std::set<std::string> m_pendingConns;
+    std::set<NodeIPEndpoint> m_pendingConns;
     Mutex x_pendingConns;
 
     MessageFactory::Ptr m_messageFactory;
@@ -190,6 +192,8 @@ private:
 
     // certificate rejected list of nodeID
     std::vector<std::string> m_certBlacklist;
+
+    NodeInfo m_nodeInfo;
 
     // certificate accepted list of nodeID
     dev::PeerWhitelist::Ptr m_whitelist;

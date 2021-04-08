@@ -66,7 +66,7 @@ void P2PSession::heartBeat()
         {
             SESSION_LOG(TRACE) << LOG_DESC("P2PSession onHeartBeat")
                                << LOG_KV("nodeID", m_nodeInfo.nodeID.abridged())
-                               << LOG_KV("name", m_session->nodeIPEndpoint().name())
+                               << LOG_KV("name", m_session->nodeIPEndpoint())
                                << LOG_KV("seq", service->topicSeq());
             auto message =
                 std::dynamic_pointer_cast<P2PMessage>(service->p2pMessageFactory()->buildMessage());
@@ -275,7 +275,7 @@ void P2PSession::parseTopicList(const std::vector<std::string>& topics,
         else
         {
             item.topic = topics[i];
-            item.topicStatus = dev::VERIFYI_SUCCESS_STATUS;
+            item.topicStatus = dev::VERIFY_SUCCESS_STATUS;
             if (item.topic.find(topicNeedVerifyPrefix) == 0)
             {
                 // if originTopicList has the topic status is set to status item
@@ -327,7 +327,7 @@ void P2PSession::updateTopicStatus(const std::string& topic, dev::TopicStatus to
             SESSION_LOG(DEBUG)
                 << "set topic:" << topic << " listen[" << this->nodeID() << "]"
                 << " to " << topicStatus
-                << "[0 VERIFYING_STATUS 1 VERIFYI_SUCCESS_STATUS 2 VERIFYI_FAILED_STATUS]";
+                << "[0 VERIFYING_STATUS 1 VERIFY_SUCCESS_STATUS 2 VERIFY_FAILED_STATUS]";
         }
         topics2Set->insert(std::move(it));
     }

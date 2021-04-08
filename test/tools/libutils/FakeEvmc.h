@@ -21,21 +21,20 @@
  * @date 2018-09-04
  */
 
-#include "libdevcrypto/Hash.h"
+#include "libdevcrypto/CryptoInterface.h"
 #include <evmc/evmc.h>
 #include <libdevcore/Address.h>
 #include <libdevcore/FixedHash.h>
 #include <libdevcrypto/Common.h>
 #include <libethcore/EVMSchedule.h>
-#include <libethcore/Instruction.h>
 #include <libethcore/LogEntry.h>
-#include <libinterpreter/interpreter.h>
+// #include <libinterpreter/Instruction.h>
+// #include <libinterpreter/interpreter.h>
 #include <test/tools/libutils/TestOutputHelper.h>
 #include <boost/test/unit_test.hpp>
 #include <iosfwd>
 #include <map>
 #include <memory>
-
 
 namespace dev
 {
@@ -48,7 +47,7 @@ const int64_t FAKE_BLOCK_NUMBER = 100;
 const int64_t FAKE_TIMESTAMP = 123456;
 const int64_t FAKE_GAS_LIMIT = 0x13880000000000;
 const u256 FAKE_DIFFICULTY = 456;
-const h256 FAKE_BLOCK_HASH = sha3(bytes());
+const h256 FAKE_BLOCK_HASH = crypto::Hash(bytes());
 
 inline evmc_address toEvmC(Address const& _addr)
 {
@@ -158,7 +157,7 @@ extern int64_t fakeDepth;
 class FakeEvmc
 {
 public:
-    explicit FakeEvmc(evmc_instance* _instance);
+    explicit FakeEvmc(evmc_vm* _instance);
     virtual ~FakeEvmc()
     {
         fakeDepth--;
@@ -176,8 +175,8 @@ public:
     int64_t depth() { return m_depth; }
 
 private:
-    struct evmc_instance* m_instance;
-    struct evmc_context* m_context;
+    struct evmc_vm* m_instance;
+    std::shared_ptr<evmc_host_context> m_context;
     int64_t m_depth;
 };
 

@@ -101,13 +101,13 @@ void Session::asyncSendMessage(Message::Ptr message, Options options, CallbackFu
                 boost::asio::placeholders::error, message->seq()));
 
             handler->timeoutHandler = timeoutHandler;
-            handler->m_startTime = utcTime();
+            handler->m_startTime = utcSteadyTime();
         }
         addSeqCallback(message->seq(), handler);
     }
     SESSION_LOG(TRACE) << LOG_DESC("Session asyncSendMessage")
                        << LOG_KV("seq2Callback.size", m_seq2Callback->size())
-                       << LOG_KV("endpoint", nodeIPEndpoint().name());
+                       << LOG_KV("endpoint", nodeIPEndpoint());
     std::shared_ptr<bytes> p_buffer = std::make_shared<bytes>();
     message->encode(*p_buffer);
     send(p_buffer);
@@ -142,11 +142,12 @@ void Session::onWrite(boost::system::error_code ec, std::size_t, std::shared_ptr
 
     try
     {
+        updateIdleTimer(m_writeIdleTimer);
         if (ec)
         {
             SESSION_LOG(WARNING) << LOG_DESC("onWrite error sending")
                                  << LOG_KV("message", ec.message())
-                                 << LOG_KV("endpoint", nodeIPEndpoint().name());
+                                 << LOG_KV("endpoint", nodeIPEndpoint());
             drop(TCPError);
             return;
         }
@@ -161,8 +162,7 @@ void Session::onWrite(boost::system::error_code ec, std::size_t, std::shared_ptr
     }
     catch (std::exception& e)
     {
-        SESSION_LOG(ERROR) << LOG_DESC("onWrite error")
-                           << LOG_KV("endpoint", nodeIPEndpoint().name())
+        SESSION_LOG(ERROR) << LOG_DESC("onWrite error") << LOG_KV("endpoint", nodeIPEndpoint())
                            << LOG_KV("what", boost::diagnostic_information(e));
         drop(TCPError);
         return;
@@ -215,8 +215,8 @@ void Session::write()
             }
             else
             {
-                SESSION_LOG(WARNING) << "Error sending ssl socket is close!"
-                                     << LOG_KV("endpoint", nodeIPEndpoint().name());
+                SESSION_LOG(WARNING)
+                    << "Error sending ssl socket is close!" << LOG_KV("endpoint", nodeIPEndpoint());
                 drop(TCPError);
                 return;
             }
@@ -230,7 +230,7 @@ void Session::write()
     }
     catch (std::exception& e)
     {
-        SESSION_LOG(ERROR) << LOG_DESC("write error") << LOG_KV("endpoint", nodeIPEndpoint().name())
+        SESSION_LOG(ERROR) << LOG_DESC("write error") << LOG_KV("endpoint", nodeIPEndpoint())
                            << LOG_KV("what", boost::diagnostic_information(e));
         drop(TCPError);
         return;
@@ -243,6 +243,14 @@ void Session::drop(DisconnectReason _reason)
     if (!m_actived)
         return;
 
+    if (m_readIdleTimer)
+    {
+        m_readIdleTimer->cancel();
+    }
+    if (m_writeIdleTimer)
+    {
+        m_writeIdleTimer->cancel();
+    }
     m_actived = false;
 
     int errorCode = P2PExceptionType::Disconnect;
@@ -254,7 +262,7 @@ void Session::drop(DisconnectReason _reason)
     }
 
     SESSION_LOG(INFO) << "drop, call and erase all callbackFunc in this session!"
-                      << LOG_KV("endpoint", nodeIPEndpoint().name());
+                      << LOG_KV("endpoint", nodeIPEndpoint());
     RecursiveGuard l(x_seq2Callback);
     for (auto& it : *m_seq2Callback)
     {
@@ -294,13 +302,13 @@ void Session::drop(DisconnectReason _reason)
             {
                 SESSION_LOG(DEBUG) << "[drop] closing remote " << m_socket->remoteEndpoint()
                                    << LOG_KV("reason", reasonOf(_reason))
-                                   << LOG_KV("endpoint", m_socket->nodeIPEndpoint().name());
+                                   << LOG_KV("endpoint", m_socket->nodeIPEndpoint());
             }
             else
             {
                 SESSION_LOG(WARNING) << "[drop] closing remote " << m_socket->remoteEndpoint()
                                      << LOG_KV("reason", reasonOf(_reason))
-                                     << LOG_KV("endpoint", m_socket->nodeIPEndpoint().name());
+                                     << LOG_KV("endpoint", m_socket->nodeIPEndpoint());
             }
 
             /// if get Host object failed, close the socket directly
@@ -333,9 +341,8 @@ void Session::drop(DisconnectReason _reason)
                 /// force to shutdown when timeout
                 if (socket->ref().is_open())
                 {
-                    SESSION_LOG(WARNING)
-                        << "[drop] timeout, force close the socket"
-                        << LOG_KV("remote endpoint", socket->nodeIPEndpoint().name());
+                    SESSION_LOG(WARNING) << "[drop] timeout, force close the socket"
+                                         << LOG_KV("remote endpoint", socket->nodeIPEndpoint());
                     socket->close();
                 }
             });
@@ -354,7 +361,7 @@ void Session::drop(DisconnectReason _reason)
                     if (socket->ref().is_open())
                     {
                         SESSION_LOG(WARNING) << LOG_DESC("force to shutdown session")
-                                             << LOG_KV("endpoint", socket->nodeIPEndpoint().name());
+                                             << LOG_KV("endpoint", socket->nodeIPEndpoint());
                         socket->close();
                     }
                 });
@@ -378,6 +385,8 @@ void Session::start()
         if (server && server->haveNetwork())
         {
             m_actived = true;
+            updateIdleTimer(m_writeIdleTimer);
+            updateIdleTimer(m_readIdleTimer);
             server->asioInterface()->strandPost(
                 boost::bind(&Session::doRead, shared_from_this()));  // doRead();
         }
@@ -396,12 +405,13 @@ void Session::doRead()
             {
                 if (ec)
                 {
-                    SESSION_LOG(WARNING) << LOG_DESC("doRead error")
-                                         << LOG_KV("endpoint", s->nodeIPEndpoint().name())
-                                         << LOG_KV("message", ec.message());
+                    SESSION_LOG(WARNING)
+                        << LOG_DESC("doRead error") << LOG_KV("endpoint", s->nodeIPEndpoint())
+                        << LOG_KV("message", ec.message());
                     s->drop(TCPError);
                     return;
                 }
+                s->updateIdleTimer(s->m_readIdleTimer);
                 s->m_data.insert(s->m_data.end(), s->m_recvBuffer.begin(),
                     s->m_recvBuffer.begin() + bytesTransferred);
 
@@ -540,4 +550,68 @@ void Session::onTimeout(const boost::system::error_code& error, uint32_t seq)
         callbackPtr->callbackFunc(e, Message::Ptr());
         removeSeqCallback(seq);
     });
+}
+
+void Session::updateIdleTimer(std::shared_ptr<boost::asio::deadline_timer> _idleTimer)
+{
+    if (!m_actived)
+    {
+        SESSION_LOG(ERROR) << LOG_DESC("Session inactived");
+
+        return;
+    }
+    if (_idleTimer)
+    {
+        _idleTimer->expires_from_now(boost::posix_time::seconds(m_idleTimeInterval));
+
+        auto session = std::weak_ptr<Session>(shared_from_this());
+        _idleTimer->async_wait([session](const boost::system::error_code& error) {
+            auto s = session.lock();
+            if (s)
+            {
+                s->onIdle(error);
+            }
+        });
+    }
+}
+
+void Session::onIdle(const boost::system::error_code& error)
+{
+    try
+    {
+        if (!m_actived)
+        {
+            SESSION_LOG(ERROR) << LOG_DESC("Session inactived");
+
+            return;
+        }
+        if (error != boost::asio::error::operation_aborted)
+        {
+            SESSION_LOG(ERROR) << LOG_DESC("Idle connection, disconnect ")
+                               << LOG_KV("endpoint", m_socket->nodeIPEndpoint());
+            drop(IdleWaitTimeout);
+        }
+    }
+    catch (std::exception& e)
+    {
+        SESSION_LOG(ERROR) << LOG_DESC("onIdle error")
+                           << LOG_KV("errorMessage", boost::diagnostic_information(e));
+    }
+}
+
+void Session::setHost(std::weak_ptr<Host> host)
+{
+    m_server = host;
+    auto server = m_server.lock();
+    if (server && server->haveNetwork())
+    {
+        m_readIdleTimer =
+            std::make_shared<boost::asio::deadline_timer>(*server->asioInterface()->ioService());
+        m_writeIdleTimer =
+            std::make_shared<boost::asio::deadline_timer>(*server->asioInterface()->ioService());
+    }
+    else
+    {
+        SESSION_LOG(ERROR) << LOG_DESC("create idleTimer failed for the host has no network");
+    }
 }

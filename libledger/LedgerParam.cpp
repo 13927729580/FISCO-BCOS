@@ -43,6 +43,7 @@ void LedgerParam::parseGenesisConfig(const std::string& _genesisFile)
 {
     try
     {
+        m_genesisConfigPath = _genesisFile;
         ptree pt;
         // read the configuration file for a specified group
         read_ini(_genesisFile, pt);
@@ -53,7 +54,15 @@ void LedgerParam::parseGenesisConfig(const std::string& _genesisFile)
         initConsensusConfig(pt);
         initEventLogFilterManagerConfig(pt);
         /// use UTCTime directly as timeStamp in case of the clock differences between machines
-        mutableGenesisParam().timeStamp = pt.get<uint64_t>("group.timestamp", UINT64_MAX);
+        auto timeStamp = pt.get<int64_t>("group.timestamp", INT64_MAX);
+        if (timeStamp < 0)
+        {
+            LedgerParam_LOG(ERROR)
+                << LOG_BADGE("parseGenesisConfig") << LOG_DESC("invalid group timeStamp")
+                << LOG_KV("timeStamp", timeStamp);
+            BOOST_THROW_EXCEPTION(Exception("invalid group timestamp"));
+        }
+        mutableGenesisParam().timeStamp = timeStamp;
         LedgerParam_LOG(INFO) << LOG_BADGE("parseGenesisConfig")
                               << LOG_KV("timestamp", mutableGenesisParam().timeStamp);
         mutableStateParam().type = pt.get<std::string>("state.type", "storage");
@@ -61,6 +70,10 @@ void LedgerParam::parseGenesisConfig(const std::string& _genesisFile)
         mutableStorageParam().type = pt.get<std::string>("storage.type", "LevelDB");
         mutableStorageParam().topic = pt.get<std::string>("storage.topic", "DB");
         mutableStorageParam().maxRetry = pt.get<uint>("storage.max_retry", 60);
+        if (g_BCOSConfig.version() >= V2_4_0)
+        {
+            setEVMFlags(pt);
+        }
     }
     catch (std::exception& e)
     {
@@ -70,10 +83,22 @@ void LedgerParam::parseGenesisConfig(const std::string& _genesisFile)
                                << LOG_KV("EINFO", boost::diagnostic_information(e));
         BOOST_THROW_EXCEPTION(dev::InitLedgerConfigFailed() << errinfo_comment(error_info));
     }
-    m_genesisBlockParam = generateGenesisMark();
+    generateGenesisMark();
 }
 
-blockchain::GenesisBlockParam LedgerParam::generateGenesisMark()
+void LedgerParam::setEVMFlags(boost::property_tree::ptree const& _pt)
+{
+    bool enableFreeStorageVMSchedule = _pt.get<bool>("evm.enable_free_storage", false);
+    if (enableFreeStorageVMSchedule)
+    {
+        mutableGenesisParam().evmFlags |= EVMFlags::FreeStorageGas;
+    }
+    LedgerParam_LOG(INFO) << LOG_DESC("setEVMFlags")
+                          << LOG_KV("enableFreeStorageVMSchedule", enableFreeStorageVMSchedule)
+                          << LOG_KV("evmFlags", mutableGenesisParam().evmFlags);
+}
+
+void LedgerParam::generateGenesisMark()
 {
     std::stringstream s;
     s << int(m_groupID) << "-";
@@ -84,19 +109,41 @@ blockchain::GenesisBlockParam LedgerParam::generateGenesisMark()
         s << mutableStorageParam().type << "-";
     }
     s << mutableStateParam().type << "-";
+    if (g_BCOSConfig.version() >= V2_4_0)
+    {
+        LedgerParam_LOG(INFO) << LOG_DESC("store evmFlag")
+                              << LOG_KV("evmFlag", mutableGenesisParam().evmFlags);
+        s << mutableGenesisParam().evmFlags << "-";
+    }
+
     s << mutableConsensusParam().maxTransactions << "-";
     s << mutableTxParam().txGasLimit;
 
-    LedgerParam_LOG(INFO) << LOG_BADGE("initMark") << LOG_KV("genesisMark", s.str());
-    return blockchain::GenesisBlockParam{s.str(), mutableConsensusParam().sealerList,
-        mutableConsensusParam().observerList, mutableConsensusParam().consensusType,
-        mutableStorageParam().type, mutableStateParam().type,
-        mutableConsensusParam().maxTransactions, mutableTxParam().txGasLimit,
-        mutableGenesisParam().timeStamp};
+    // init epochSealerNum and epochBlockNum for rPBFT
+    if (dev::stringCmpIgnoreCase(mutableConsensusParam().consensusType, "rpbft") == 0)
+    {
+        LedgerParam_LOG(INFO) << LOG_DESC("store rPBFT related configuration")
+                              << LOG_KV("epochSealerNum", mutableConsensusParam().epochSealerNum)
+                              << LOG_KV("epochBlockNum", mutableConsensusParam().epochBlockNum);
+        s << "-" << mutableConsensusParam().epochSealerNum << "-";
+        s << mutableConsensusParam().epochBlockNum;
+    }
+    // only the supported_version is greater than or equal to v2.6.0,
+    // the consensus time runtime setting is enabled
+    if (g_BCOSConfig.version() >= V2_6_0)
+    {
+        LedgerParam_LOG(INFO) << LOG_DESC("store consensus time")
+                              << LOG_KV(
+                                     "consensusTimeout", mutableConsensusParam().consensusTimeout);
+        s << "-" << mutableConsensusParam().consensusTimeout;
+    }
+    m_genesisMark = s.str();
+    LedgerParam_LOG(INFO) << LOG_BADGE("initMark") << LOG_KV("genesisMark", m_genesisMark);
 }
 
 void LedgerParam::parseIniConfig(const std::string& _iniConfigFile, const std::string& _dataPath)
 {
+    m_iniConfigPath = _iniConfigFile;
     std::string prefix = _dataPath + "/group" + std::to_string(m_groupID);
     if (_dataPath == "")
     {
@@ -119,6 +166,8 @@ void LedgerParam::parseIniConfig(const std::string& _iniConfigFile, const std::s
     initTxExecuteConfig(pt);
     // init params releated to consensus(ttl)
     initConsensusIniConfig(pt);
+    initFlowControlConfig(pt);
+    parseSDKAllowList(m_permissionParam.sdkAllowList, pt);
 }
 
 void LedgerParam::init(const std::string& _configFilePath, const std::string& _dataPath)
@@ -138,7 +187,16 @@ void LedgerParam::initTxExecuteConfig(ptree const& pt)
 {
     if (dev::stringCmpIgnoreCase(mutableStateParam().type, "storage") == 0)
     {
-        mutableTxParam().enableParallel = pt.get<bool>("tx_execute.enable_parallel", true);
+        // enable parallel since v2.3.0 when stateType is storage
+        if (g_BCOSConfig.version() >= V2_3_0)
+        {
+            mutableTxParam().enableParallel = true;
+        }
+        // can configure enable_parallel before v2.3.0
+        else
+        {
+            mutableTxParam().enableParallel = pt.get<bool>("tx_execute.enable_parallel", true);
+        }
     }
     else
     {
@@ -160,8 +218,27 @@ void LedgerParam::initTxPoolConfig(ptree const& pt)
                 ForbidNegativeValue() << errinfo_comment("Please set tx_pool.limit to positive !"));
         }
 
+        auto memorySizeLimit = pt.get<int64_t>("tx_pool.memory_limit", TX_POOL_DEFAULT_MEMORY_SIZE);
+        if (memorySizeLimit < 0 || memorySizeLimit >= MAX_VALUE_IN_MB)
+        {
+            BOOST_THROW_EXCEPTION(
+                ForbidNegativeValue() << errinfo_comment(
+                    "Please set tx_pool.limit to be larger than 0 and smaller than " +
+                    std::to_string(MAX_VALUE_IN_MB)));
+        }
+        mutableTxPoolParam().maxTxPoolMemorySize = memorySizeLimit * 1024 * 1024;
+
+        auto notifyWorkerNum = pt.get<int64_t>("tx_pool.notify_worker_num", 2);
+        if (notifyWorkerNum <= 0)
+        {
+            BOOST_THROW_EXCEPTION(ForbidNegativeValue() << errinfo_comment(
+                                      "Please set tx_pool.notify_worker_num to positive !"));
+        }
+        mutableTxPoolParam().notifyWorkerNum = notifyWorkerNum;
         LedgerParam_LOG(INFO) << LOG_BADGE("initTxPoolConfig")
-                              << LOG_KV("txPoolLimit", mutableTxPoolParam().txPoolLimit);
+                              << LOG_KV("txPoolLimit", mutableTxPoolParam().txPoolLimit)
+                              << LOG_KV("memorySizeLimit(MB)", memorySizeLimit)
+                              << LOG_KV("notifyWorkerNum", notifyWorkerNum);
     }
     catch (std::exception& e)
     {
@@ -170,24 +247,71 @@ void LedgerParam::initTxPoolConfig(ptree const& pt)
     }
 }
 
+void LedgerParam::initRPBFTConsensusIniConfig(boost::property_tree::ptree const& pt)
+{
+    mutableConsensusParam().broadcastPrepareByTree =
+        pt.get<bool>("consensus.broadcast_prepare_by_tree", true);
+
+    mutableConsensusParam().prepareStatusBroadcastPercent =
+        pt.get<signed>("consensus.prepare_status_broadcast_percent", 33);
+    if (mutableConsensusParam().prepareStatusBroadcastPercent < 25 ||
+        mutableConsensusParam().prepareStatusBroadcastPercent > 100)
+    {
+        BOOST_THROW_EXCEPTION(
+            InvalidConfiguration() << errinfo_comment(
+                "consensus.prepare_status_broadcast_percent must be between 25 and 100"));
+    }
+    // maxRequestMissedTxsWaitTime
+    mutableConsensusParam().maxRequestMissedTxsWaitTime =
+        pt.get<int64_t>("consensus.max_request_missedTxs_waitTime", 100);
+    if (mutableConsensusParam().maxRequestMissedTxsWaitTime < 5 ||
+        mutableConsensusParam().maxRequestMissedTxsWaitTime > 1000)
+    {
+        BOOST_THROW_EXCEPTION(
+            InvalidConfiguration()
+            << errinfo_comment("consensus.max_request_missedTxs_waitTime must between 5 and 1000"));
+    }
+    // maxRequestPrepareWaitTime;
+    mutableConsensusParam().maxRequestPrepareWaitTime =
+        pt.get<int64_t>("consensus.max_request_prepare_waitTime", 100);
+    if (mutableConsensusParam().maxRequestPrepareWaitTime < 10 ||
+        mutableConsensusParam().maxRequestPrepareWaitTime > 1000)
+    {
+        BOOST_THROW_EXCEPTION(
+            InvalidConfiguration()
+            << errinfo_comment("consensus.max_request_prepare_waitTime must between 10 and 1000"));
+    }
+    LedgerParam_LOG(INFO) << LOG_BADGE("initRPBFTConsensusIniConfig")
+                          << LOG_KV("broadcastPrepareByTree",
+                                 mutableConsensusParam().broadcastPrepareByTree)
+                          << LOG_KV("prepareStatusBroadcastPercent",
+                                 mutableConsensusParam().prepareStatusBroadcastPercent)
+                          << LOG_KV("maxRequestMissedTxsWaitTime",
+                                 mutableConsensusParam().maxRequestMissedTxsWaitTime)
+                          << LOG_KV("maxRequestPrepareWaitTime",
+                                 mutableConsensusParam().maxRequestPrepareWaitTime);
+}
 
 void LedgerParam::initConsensusIniConfig(ptree const& pt)
 {
     mutableConsensusParam().maxTTL = pt.get<int8_t>("consensus.ttl", consensus::MAXTTL);
-    if (mutableConsensusParam().maxTTL < 0)
+    if (mutableConsensusParam().maxTTL < 0 ||
+        mutableConsensusParam().maxTTL > mutableConsensusParam().ttlLimit)
     {
-        BOOST_THROW_EXCEPTION(
-            ForbidNegativeValue() << errinfo_comment("Please set consensus.ttl to positive !"));
+        BOOST_THROW_EXCEPTION(ForbidNegativeValue() << errinfo_comment(
+                                  "Please set consensus.ttl between 0 and " +
+                                  std::to_string(mutableConsensusParam().ttlLimit) + " !"));
     }
 
     // the minimum block generation time(ms)
-    mutableConsensusParam().minBlockGenTime =
-        pt.get<signed>("consensus.min_block_generation_time", 500);
-    if (mutableConsensusParam().minBlockGenTime < 0)
+    int64_t minBlockGenTime = pt.get<signed>("consensus.min_block_generation_time", 500);
+    if (minBlockGenTime < 0 || minBlockGenTime >= UINT_MAX)
     {
-        BOOST_THROW_EXCEPTION(ForbidNegativeValue() << errinfo_comment(
-                                  "Please set consensus.min_block_generation_time to positive !"));
+        BOOST_THROW_EXCEPTION(InvalidConfiguration() << errinfo_comment(
+                                  "Please set consensus.min_block_generation_time between 1 and " +
+                                  std::to_string(UINT_MAX) + " !"));
     }
+    mutableConsensusParam().minBlockGenTime = minBlockGenTime;
 
     // enable dynamic block size
     mutableConsensusParam().enableDynamicBlockSize =
@@ -229,6 +353,7 @@ void LedgerParam::initConsensusIniConfig(ptree const& pt)
     {
         mutableConsensusParam().enablePrepareWithTxsHash = false;
     }
+
     LedgerParam_LOG(INFO)
         << LOG_BADGE("initConsensusIniConfig")
         << LOG_KV("maxTTL", std::to_string(mutableConsensusParam().maxTTL))
@@ -237,6 +362,8 @@ void LedgerParam::initConsensusIniConfig(ptree const& pt)
         << LOG_KV("blockSizeIncreaseRatio", mutableConsensusParam().blockSizeIncreaseRatio)
         << LOG_KV("enableTTLOptimize", mutableConsensusParam().enableTTLOptimize)
         << LOG_KV("enablePrepareWithTxsHash", mutableConsensusParam().enablePrepareWithTxsHash);
+    // init rpbft related configurations
+    initRPBFTConsensusIniConfig(pt);
 }
 
 
@@ -255,6 +382,20 @@ void LedgerParam::initConsensusConfig(ptree const& pt)
         BOOST_THROW_EXCEPTION(ForbidNegativeValue() << errinfo_comment(
                                   "Please set consensus.max_trans_num to positive !"));
     }
+
+    // init consensusTimeout
+    auto consensusTimeout = pt.get<int64_t>("consensus.consensus_timeout", 3);
+
+    if (mutableConsensusParam().consensusTimeout < dev::precompiled::SYSTEM_CONSENSUS_TIMEOUT_MIN ||
+        mutableConsensusParam().consensusTimeout >= dev::precompiled::SYSTEM_CONSENSUS_TIMEOUT_MAX)
+    {
+        BOOST_THROW_EXCEPTION(
+            InvalidConfiguration() << errinfo_comment(
+                "Please set consensus.consensus_time must between " +
+                std::to_string(dev::precompiled::SYSTEM_CONSENSUS_TIMEOUT_MIN) + "s and " +
+                std::to_string(dev::precompiled::SYSTEM_CONSENSUS_TIMEOUT_MAX) + "s !"));
+    }
+    mutableConsensusParam().consensusTimeout = consensusTimeout;
 
     mutableConsensusParam().minElectTime = pt.get<int64_t>("consensus.min_elect_time", 1000);
     if (mutableConsensusParam().minElectTime <= 0)
@@ -278,35 +419,52 @@ void LedgerParam::initConsensusConfig(ptree const& pt)
 
     LedgerParam_LOG(INFO) << LOG_BADGE("initConsensusConfig")
                           << LOG_KV("type", mutableConsensusParam().consensusType)
+                          << LOG_KV("consensusTimeout", mutableConsensusParam().consensusTimeout)
                           << LOG_KV("maxTxNum", mutableConsensusParam().maxTransactions)
                           << LOG_KV("txGasLimit", mutableTxParam().txGasLimit);
 
+    // if the consensus node id is invalid, throw InvalidConfiguration exception
+    parsePublicKeyListOfSection(mutableConsensusParam().sealerList, pt, "consensus", "node.");
     std::stringstream nodeListMark;
-    try
+    // init nodeListMark
+    for (auto const& node : mutableConsensusParam().sealerList)
     {
-        for (auto it : pt.get_child("consensus"))
-        {
-            if (it.first.find("node.") == 0)
-            {
-                std::string data = it.second.data();
-                boost::to_lower(data);
-                LedgerParam_LOG(INFO)
-                    << LOG_BADGE("initConsensusConfig") << LOG_KV("it.first", data);
-                // Uniform lowercase nodeID
-                dev::h512 nodeID(data);
-                mutableConsensusParam().sealerList.push_back(nodeID);
-                // The full output node ID is required.
-                nodeListMark << data << ",";
-            }
-        }
-    }
-    catch (std::exception& e)
-    {
-        LedgerParam_LOG(ERROR) << LOG_BADGE("initConsensusConfig")
-                               << LOG_DESC("Parse consensus section failed")
-                               << LOG_KV("EINFO", boost::diagnostic_information(e));
+        nodeListMark << toHex(node) << ",";
     }
     mutableGenesisParam().nodeListMark = nodeListMark.str();
+
+    // init configurations for rPBFT
+    mutableConsensusParam().epochSealerNum =
+        pt.get<int64_t>("consensus.epoch_sealer_num", mutableConsensusParam().sealerList.size());
+    if (mutableConsensusParam().epochSealerNum <= 0)
+    {
+        BOOST_THROW_EXCEPTION(InvalidConfiguration() << errinfo_comment(
+                                  "Please set consensus.epoch_sealer_num to be larger than 0!"));
+    }
+
+    mutableConsensusParam().epochBlockNum = pt.get<int64_t>("consensus.epoch_block_num", 1000);
+    if (g_BCOSConfig.version() < V2_6_0)
+    {
+        if (mutableConsensusParam().epochBlockNum <= 0)
+        {
+            BOOST_THROW_EXCEPTION(ForbidNegativeValue() << errinfo_comment(
+                                      "Please set consensus.epoch_block_num to positive !"));
+        }
+    }
+    else
+    {
+        // epoch_block_num is at least 2 when supported_version >= v2.6.0
+        if (mutableConsensusParam().epochBlockNum <= dev::precompiled::RPBFT_EPOCH_BLOCK_NUM_MIN)
+        {
+            BOOST_THROW_EXCEPTION(
+                InvalidConfiguration() << errinfo_comment(
+                    "Please set consensus.epoch_block_num to be larger than " +
+                    std::to_string(dev::precompiled::RPBFT_EPOCH_BLOCK_NUM_MIN) + "!"));
+        }
+    }
+    LedgerParam_LOG(DEBUG) << LOG_BADGE("initConsensusConfig")
+                           << LOG_KV("epochSealerNum", mutableConsensusParam().epochSealerNum)
+                           << LOG_KV("epochBlockNum", mutableConsensusParam().epochBlockNum);
 }
 
 void LedgerParam::initSyncConfig(ptree const& pt)
@@ -350,7 +508,7 @@ void LedgerParam::initSyncConfig(ptree const& pt)
     mutableSyncParam().gossipInterval = pt.get<int64_t>("sync.gossip_interval_ms", 1000);
     if (mutableSyncParam().gossipInterval < 1000 || mutableSyncParam().gossipInterval > 3000)
     {
-        BOOST_THROW_EXCEPTION(ForbidNegativeValue() << errinfo_comment(
+        BOOST_THROW_EXCEPTION(InvalidConfiguration() << errinfo_comment(
                                   "Please set sync.gossip_interval_ms to between 1000ms-3000ms!"));
     }
     LedgerParam_LOG(INFO) << LOG_BADGE("initSyncConfig")
@@ -364,14 +522,35 @@ void LedgerParam::initSyncConfig(ptree const& pt)
                                   "Please set sync.gossip_peers_number to positive !"));
     }
     // set the sync-tree-width, default is 3
-    // mutableSyncParam().syncTreeWidth = pt.get<int64_t>("sync.sync_tree_width", 3);
     mutableSyncParam().syncTreeWidth = 3;
-    LedgerParam_LOG(INFO) << LOG_BADGE("initSyncConfig")
-                          << LOG_KV("enableSendBlockStatusByTree",
-                                 mutableSyncParam().enableSendBlockStatusByTree)
-                          << LOG_KV("gossipInterval", mutableSyncParam().gossipInterval)
-                          << LOG_KV("gossipPeers", mutableSyncParam().gossipPeers)
-                          << LOG_KV("syncTreeWidth", mutableSyncParam().syncTreeWidth);
+    // max_block_sync_queue_size, default is 512MB
+    mutableSyncParam().maxQueueSizeForBlockSync =
+        pt.get<int>("sync.max_block_sync_memory_size", 512);
+
+    if (mutableSyncParam().maxQueueSizeForBlockSync < 32 ||
+        mutableSyncParam().maxQueueSizeForBlockSync >= MAX_VALUE_IN_MB)
+    {
+        BOOST_THROW_EXCEPTION(
+            InvalidConfiguration() << errinfo_comment("Please set max_block_sync_memory_size must "
+                                                      "be no smaller than 32MB and smaller than " +
+                                                      std::to_string(MAX_VALUE_IN_MB)));
+    }
+    mutableSyncParam().txsStatusGossipMaxPeers = pt.get<signed>("sync.txs_max_gossip_peers_num", 5);
+    if (mutableSyncParam().txsStatusGossipMaxPeers < 0)
+    {
+        BOOST_THROW_EXCEPTION(InvalidConfiguration() << errinfo_comment(
+                                  "txs_gossip_max_peers_num must be no smaller than zero"));
+    }
+    mutableSyncParam().maxQueueSizeForBlockSync *= 1024 * 1024;
+
+    LedgerParam_LOG(INFO)
+        << LOG_BADGE("initSyncConfig")
+        << LOG_KV("enableSendBlockStatusByTree", mutableSyncParam().enableSendBlockStatusByTree)
+        << LOG_KV("gossipInterval", mutableSyncParam().gossipInterval)
+        << LOG_KV("gossipPeers", mutableSyncParam().gossipPeers)
+        << LOG_KV("syncTreeWidth", mutableSyncParam().syncTreeWidth)
+        << LOG_KV("maxQueueSizeForBlockSync", mutableSyncParam().maxQueueSizeForBlockSync)
+        << LOG_KV("txsStatusGossipMaxPeers", mutableSyncParam().txsStatusGossipMaxPeers);
 }
 
 std::string LedgerParam::uriEncode(const std::string& keyWord)
@@ -421,15 +600,25 @@ void LedgerParam::initStorageConfig(ptree const& pt)
     {
         mutableStorageParam().path += "/Scalable";
     }
-    mutableStorageParam().maxCapacity = pt.get<uint>("storage.max_capacity", 32);
+    mutableStorageParam().maxCapacity = pt.get<int>("storage.max_capacity", 32);
+
+    if (mutableStorageParam().maxCapacity <= 0 &&
+        mutableStorageParam().maxCapacity >= MAX_VALUE_IN_MB)
+    {
+        BOOST_THROW_EXCEPTION(InvalidConfiguration() << errinfo_comment(
+                                  "storage.max_capacity must be larger than 0 and smaller than " +
+                                  std::to_string(MAX_VALUE_IN_MB)));
+    }
+
     auto scrollThresholdMultiple = pt.get<uint>("storage.scroll_threshold_multiple", 2);
     mutableStorageParam().scrollThreshold =
         scrollThresholdMultiple > 0 ? scrollThresholdMultiple * g_BCOSConfig.c_blockLimit : 2000;
 
     mutableStorageParam().maxForwardBlock = pt.get<uint>("storage.max_forward_block", 10);
 
-    if (mutableStorageParam().maxRetry <= 0)
+    if (mutableStorageParam().maxRetry <= 1)
     {
+        LedgerParam_LOG(WARNING) << LOG_BADGE("initStorageConfig maxRetry should max than 1");
         mutableStorageParam().maxRetry = 60;
     }
 
@@ -470,6 +659,90 @@ void LedgerParam::initEventLogFilterManagerConfig(boost::property_tree::ptree co
                                  mutableEventLogFilterManagerParams().maxBlockRange)
                           << LOG_KV("maxBlockPerProcess",
                                  mutableEventLogFilterManagerParams().maxBlockPerProcess);
+}
+
+void LedgerParam::initFlowControlConfig(boost::property_tree::ptree const& _pt)
+{
+    auto maxQPS =
+        _pt.get<int64_t>("flow_control.limit_req", mutableFlowControlParam().maxDefaultValue);
+    if (maxQPS <= 0)
+    {
+        BOOST_THROW_EXCEPTION(
+            InvalidConfiguration() << errinfo_comment("flow_control.limit_req must be positive"));
+    }
+    mutableFlowControlParam().maxQPS = maxQPS;
+    auto outGoingBandwidth = _pt.get<double>(
+        "flow_control.outgoing_bandwidth_limit", mutableFlowControlParam().maxDefaultValue);
+    // values configured using configuration items
+    if (outGoingBandwidth != (double)mutableFlowControlParam().maxDefaultValue)
+    {
+        if (outGoingBandwidth <= (double)(-0.0) || outGoingBandwidth >= (double)MAX_VALUE_IN_Mb)
+        {
+            BOOST_THROW_EXCEPTION(InvalidConfiguration()
+                                  << errinfo_comment("flow_control.outgoing_bandwidth_limit must "
+                                                     "be larger than 0 and smaller than " +
+                                                     std::to_string(MAX_VALUE_IN_Mb)));
+        }
+        outGoingBandwidth = outGoingBandwidth * 1024 * 1024 / 8;
+        mutableFlowControlParam().outGoingBandwidthLimit = (int64_t)(outGoingBandwidth);
+    }
+    else
+    {
+        LedgerParam_LOG(DEBUG) << LOG_BADGE("initFlowControlConfig")
+                               << LOG_DESC(
+                                      "disable NetworkBandWidthLimiter for "
+                                      "flow_control.outgoing_bandwidth_limit is not configured");
+        mutableFlowControlParam().outGoingBandwidthLimit =
+            mutableFlowControlParam().maxDefaultValue;
+    }
+
+    LedgerParam_LOG(INFO) << LOG_BADGE("initFlowControlConfig")
+                          << LOG_KV("maxQPS", mutableFlowControlParam().maxQPS)
+                          << LOG_KV("outGoingBandwidth(Bytes)",
+                                 mutableFlowControlParam().outGoingBandwidthLimit);
+}
+
+void LedgerParam::parsePublicKeyListOfSection(dev::h512s& _nodeList,
+    boost::property_tree::ptree const& _pt, std::string const& _sectionName,
+    std::string const& _subSectionName)
+{
+    if (!_pt.get_child_optional(_sectionName))
+    {
+        LedgerParam_LOG(DEBUG) << LOG_DESC("parsePublicKeyListOfSection return for empty config")
+                               << LOG_KV("sectionName", _sectionName);
+        return;
+    }
+    for (auto const& it : _pt.get_child(_sectionName))
+    {
+        if (it.first.find(_subSectionName) != 0)
+        {
+            continue;
+        }
+        std::string data = it.second.data();
+        boost::to_lower(data);
+        if (!isNodeIDOk(data))
+        {
+            LedgerParam_LOG(WARNING)
+                << LOG_BADGE("load public key: invalid public key") << LOG_KV("invalidPubKey", data)
+                << LOG_KV("sectionName", _sectionName);
+            BOOST_THROW_EXCEPTION(InvalidConfiguration() << errinfo_comment(
+                                      "load public key failed, invalid public key:" + data +
+                                      ", configuration section:" + _sectionName));
+        }
+        LedgerParam_LOG(INFO) << LOG_BADGE("parsePublicKeyListOfSection")
+                              << LOG_KV("sectionName", _sectionName) << LOG_KV("it.first", data);
+        _nodeList.push_back(dev::h512(data));
+    }
+    LedgerParam_LOG(INFO) << LOG_BADGE("parsePublicKeyListOfSection")
+                          << LOG_KV("totalPubKeySize", _nodeList.size());
+}
+
+void LedgerParam::parseSDKAllowList(dev::h512s& _nodeList, boost::property_tree::ptree const& _pt)
+{
+    parsePublicKeyListOfSection(_nodeList, _pt, "sdk_allowlist", "public_key.");
+    bool enableSDKAllowListControl = (_nodeList.size() > 0);
+    LedgerParam_LOG(INFO) << LOG_DESC("parseSDKAllowList") << LOG_KV("sdkAllowList", _nodeList)
+                          << LOG_KV("enableSDKAllowListControl", enableSDKAllowListControl);
 }
 
 }  // namespace ledger

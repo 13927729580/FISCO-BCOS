@@ -26,10 +26,9 @@
 #include "BlockHeader.h"
 #include "Common.h"
 #include "Exceptions.h"
+#include "libdevcrypto/CryptoInterface.h"
 #include <libdevcore/Common.h>
-#include <libdevcore/MemoryDB.h>
 #include <libdevcore/RLP.h>
-#include <libdevcore/TrieDB.h>
 #include <libdevcore/TrieHash.h>
 using namespace std;
 using namespace dev;
@@ -46,7 +45,7 @@ BlockHeader::BlockHeader() {}
 BlockHeader::BlockHeader(bytesConstRef _block, BlockDataType _bdt, h256 const& _hashWith)
 {
     RLP header = _bdt == BlockData ? extractHeader(_block) : RLP(_block);
-    m_hash = _hashWith ? _hashWith : sha3(header.data());
+    m_hash = _hashWith ? _hashWith : crypto::Hash(header.data());
     populate(header);
 }
 
@@ -131,7 +130,7 @@ h256 BlockHeader::hash() const
     {
         bytes header;
         encode(header);
-        m_hash = sha3(header);
+        m_hash = crypto::Hash(header);
     }
     return m_hash;
 }
@@ -166,7 +165,7 @@ void BlockHeader::decode(bytesConstRef& _header_data)
 h256 BlockHeader::headerHashFromBlock(bytesConstRef _block)
 {
     // TODO: exception unit test
-    return sha3(RLP(_block)[0].data());
+    return crypto::Hash(RLP(_block)[0].data());
 }
 
 /**
@@ -287,7 +286,8 @@ void BlockHeader::verify(Strictness _s, BlockHeader const& _parent, bytesConstRe
     {
         RLP root(_block);
         auto txList = root[1];
-        auto expectedRoot = trieRootOver(txList.itemCount(), [&](unsigned i) { return rlp(i); },
+        auto expectedRoot = trieRootOver(
+            txList.itemCount(), [&](unsigned i) { return rlp(i); },
             [&](unsigned i) { return txList[i].data().toBytes(); });
         LOG(WARNING) << "Expected trie root: " << expectedRoot;
         if (m_transactionsRoot != expectedRoot)

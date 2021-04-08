@@ -21,9 +21,13 @@
  */
 
 #include "BasicRocksDB.h"
+#include <libconfig/GlobalConfigure.h>
 #include <libdevcore/Exceptions.h>
+#include <libdevcore/SnappyCompress.h>
 #include <boost/filesystem.hpp>
+#include <string>
 
+using namespace std;
 using namespace dev;
 using namespace dev::storage;
 using namespace rocksdb;
@@ -44,17 +48,99 @@ rocksdb::Options dev::storage::getRocksDBOptions()
     return options;
 }
 
+
+std::function<void(std::string const&, std::string&)> dev::storage::getEncryptHandler(
+    const std::vector<uint8_t>& _encryptKey, bool _enableCompress)
+{
+    // get dataKey according to ciperDataKey from keyCenter
+    return [=](std::string const& data, std::string& encData) {
+        try
+        {
+            if (!_enableCompress)
+            {
+                encData = crypto::SymmetricEncrypt((const unsigned char*)data.data(), data.size(),
+                    (const unsigned char*)_encryptKey.data(), _encryptKey.size(),
+                    (const unsigned char*)_encryptKey.data());
+                return;
+            }
+            // compress before encrypt
+            std::shared_ptr<bytes> compressedData = std::make_shared<bytes>();
+            size_t compressedSize = dev::compress::SnappyCompress::compress(
+                bytesConstRef((const unsigned char*)data.data(), data.length()), *compressedData);
+            if (compressedSize == 0)
+            {
+                std::string errorInfo =
+                    "Compress data for " + toHex(_encryptKey) + " failed for compress failed";
+                ROCKSDB_LOG(ERROR) << LOG_DESC(errorInfo);
+                BOOST_THROW_EXCEPTION(EncryptFailed() << errinfo_comment(errorInfo));
+            }
+            encData = crypto::SymmetricEncrypt((const unsigned char*)compressedData->data(),
+                compressedData->size(), (const unsigned char*)_encryptKey.data(),
+                _encryptKey.size(), (const unsigned char*)_encryptKey.data());
+        }
+        catch (const std::exception& e)
+        {
+            std::string error_info = "encryt value for data=" + data +
+                                     " failed, EINFO: " + boost::diagnostic_information(e);
+            ROCKSDB_LOG(ERROR) << LOG_DESC(error_info);
+            BOOST_THROW_EXCEPTION(EncryptFailed() << errinfo_comment(error_info));
+        }
+    };
+}
+
+std::function<void(std::string&)> dev::storage::getDecryptHandler(
+    const std::vector<uint8_t>& _decryptKey, bool _enableCompress)
+{
+    return [=](std::string& data) {
+        try
+        {
+            data = crypto::SymmetricDecrypt((const unsigned char*)data.data(), data.size(),
+                (const unsigned char*)_decryptKey.data(), _decryptKey.size(),
+                (const unsigned char*)_decryptKey.data());
+
+            if (!_enableCompress)
+            {
+                return;
+            }
+            // uncompress the decrypted data
+            std::shared_ptr<bytes> uncompressedData = std::make_shared<bytes>();
+            auto uncompressedDataSize = dev::compress::SnappyCompress::uncompress(
+                bytesConstRef((const unsigned char*)data.data(), data.length()), *uncompressedData);
+            if (uncompressedDataSize == 0)
+            {
+                std::string errorInfo =
+                    "decrypt value for key " + toHex(_decryptKey) + " failed for uncompress failed";
+                ROCKSDB_LOG(ERROR) << LOG_DESC(errorInfo);
+                BOOST_THROW_EXCEPTION(DecryptFailed() << errinfo_comment(errorInfo));
+            }
+            // resize and copy the uncompressed data
+            data.resize(uncompressedData->size());
+            memcpy((void*)data.data(), (const void*)uncompressedData->data(),
+                uncompressedData->size());
+        }
+        catch (const std::exception& e)
+        {
+            std::string error_info = "decrypt value for key=" + toHex(_decryptKey) + " failed";
+            ROCKSDB_LOG(ERROR) << LOG_DESC(error_info);
+            BOOST_THROW_EXCEPTION(DecryptFailed() << errinfo_comment(error_info));
+        }
+    };
+}
+
+
 void BasicRocksDB::flush()
 {
     if (m_db)
     {
         FlushOptions flushOption;
-        flushOption.wait = false;
+        flushOption.wait = true;
+        flushOption.allow_write_stall = true;
         m_db->Flush(flushOption);
     }
 }
 void BasicRocksDB::closeDB()
 {
+    flush();
     m_db.reset();
 }
 /**
@@ -62,11 +148,8 @@ void BasicRocksDB::closeDB()
  *
  * @param options: options used to open the rocksDB
  * @param dbname: db name
- * @return std::shared_ptr<rocksdb::DB>:
- * 1. open successfully: return the DB handler
- * 2. open failed: throw exception(OpenDBFailed)
  */
-std::shared_ptr<rocksdb::DB> BasicRocksDB::Open(const Options& options, const std::string& dbname)
+void BasicRocksDB::Open(const Options& options, const std::string& dbname)
 {
     ROCKSDB_LOG(INFO) << LOG_DESC("open rocksDB handler") << LOG_KV("path", dbname);
     boost::filesystem::create_directories(dbname);
@@ -74,7 +157,6 @@ std::shared_ptr<rocksdb::DB> BasicRocksDB::Open(const Options& options, const st
     auto status = DB::Open(options, dbname, &db);
     checkStatus(status, dbname);
     m_db.reset(db);
-    return m_db;
 }
 
 Status BasicRocksDB::Get(ReadOptions const& options, std::string const& key, std::string& value)
@@ -120,7 +202,7 @@ Status BasicRocksDB::PutWithLock(
     }
 }
 
-Status BasicRocksDB::Put(WriteBatch& batch, std::string const& key, std::string& value)
+Status BasicRocksDB::Put(WriteBatch& batch, std::string const& key, std::string const& value)
 {
     // encrypt value
     if (m_encryptHandler)

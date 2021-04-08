@@ -36,8 +36,10 @@
 #include "libp2p/P2PMessageFactory.h"           // for P2PMessageFac...
 #include "libp2p/P2PSession.h"                  // for P2PSession
 #include <json/json.h>
+#include <libeventfilter/Common.h>
 #include <libp2p/P2PMessage.h>
 #include <libp2p/Service.h>
+#include <librpc/StatisticProtocolServer.h>
 #include <unistd.h>
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/asio.hpp>
@@ -47,7 +49,6 @@
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <string>
-
 
 using namespace std;
 using namespace dev;
@@ -166,6 +167,8 @@ void ChannelRPCServer::onConnect(
         CHANNEL_LOG(INFO) << "channel new connect, host=" << session->host() << ":"
                           << session->port();
 
+        session->setNetworkStat(m_networkStatHandler);
+
         auto sessionID = ++_sessionCount;
         {
             std::lock_guard<std::mutex> lock(_sessionMutex);
@@ -243,6 +246,8 @@ void dev::ChannelRPCServer::blockNotify(int16_t _groupID, int64_t _blockNumber)
     response["blockNumber"] = _blockNumber;
     Json::FastWriter writer;
     auto resp = writer.write(response);
+    stringstream ss;
+
     for (auto session : activedSessions)
     {
         message->clearData();
@@ -258,10 +263,11 @@ void dev::ChannelRPCServer::blockNotify(int16_t _groupID, int64_t _blockNumber)
         session->asyncSendMessage(
             message, std::function<void(dev::channel::ChannelException, Message::Ptr)>(), 0);
 
-        CHANNEL_LOG(INFO) << "Push channel message success" << LOG_KV("topic", topic)
-                          << LOG_KV("seq", message->seq().substr(0, c_seqAbridgedLen))
-                          << LOG_KV("session", session->host()) << ":" << session->port();
+        ss << session->host() << ":" << session->port() << ",";
     }
+    CHANNEL_LOG(INFO) << "Push message success" << LOG_KV("topic", topic)
+                      << LOG_KV("seq", message->seq().substr(0, c_seqAbridgedLen))
+                      << LOG_KV("session", ss.str());
 }
 
 void dev::ChannelRPCServer::onClientRequest(dev::channel::ChannelSession::Ptr session,
@@ -285,14 +291,17 @@ void dev::ChannelRPCServer::onClientRequest(dev::channel::ChannelSession::Ptr se
             onClientHandshake(session, message);
             break;
         case CLIENT_REGISTER_EVENT_LOG:
-            onClientEventLogRequest(session, message);
+            onClientRegisterEventLogRequest(session, message);
+            break;
+        case CLIENT_UNREGISTER_EVENT_LOG:
+            onClientUnregisterEventLogRequest(session, message);
             break;
         case AMOP_REQUEST:
         case AMOP_RESPONSE:
         case AMOP_MULBROADCAST:
             onClientChannelRequest(session, message);
             break;
-        case AMOP_CLIENT_TOPICS:
+        case AMOP_CLIENT_SUBSCRIBE_TOPICS:
             onClientTopicRequest(session, message);
             break;
         case UPDATE_TOPIICSTATUS:
@@ -355,7 +364,7 @@ void dev::ChannelRPCServer::onClientUpdateTopicStatusRequest(
         if (session)
         {
             session->updateTopicStatus(
-                topic, checkResult == 0 ? dev::VERIFYI_SUCCESS_STATUS : dev::VERIFYI_FAILED_STATUS);
+                topic, checkResult == 0 ? dev::VERIFY_SUCCESS_STATUS : dev::VERIFY_FAILED_STATUS);
         }
     }
     catch (ChannelException& e)
@@ -392,14 +401,16 @@ void dev::ChannelRPCServer::onClientRPCRequest(
             auto protocolVersion = static_cast<uint32_t>(session->protocolVersion());
 
             m_callbackSetter(
-                new std::function<void(const std::string& receiptContext)>(
-                    [serverRef, sessionRef, seq](const std::string& receiptContext) {
+                new std::function<void(const std::string& receiptContext, GROUP_ID _groupId)>(
+                    [serverRef, sessionRef, seq](
+                        const std::string& receiptContext, GROUP_ID _groupId) {
                         auto server = serverRef.lock();
                         auto session = sessionRef.lock();
                         if (server && session)
                         {
                             auto channelMessage = server->messageFactory()->buildMessage();
                             channelMessage->setType(TRANSACTION_NOTIFY);
+                            channelMessage->setGroupID(_groupId);
                             channelMessage->setSeq(seq);
                             channelMessage->setResult(0);
                             channelMessage->setData(
@@ -419,11 +430,11 @@ void dev::ChannelRPCServer::onClientRPCRequest(
 
     try
     {
-        OnRequest(body, addInfo);
+        OnRpcRequest(session, body, addInfo);
     }
     catch (std::exception& e)
     {
-        CHANNEL_LOG(ERROR) << "Error while onRequest rpc: " << boost::diagnostic_information(e);
+        CHANNEL_LOG(ERROR) << "Error while OnRpcRequest rpc: " << boost::diagnostic_information(e);
     }
 
     if (m_callbackSetter)
@@ -432,7 +443,25 @@ void dev::ChannelRPCServer::onClientRPCRequest(
     }
 }
 
-void dev::ChannelRPCServer::onClientEventLogRequest(
+bool dev::ChannelRPCServer::OnRpcRequest(
+    dev::channel::ChannelSession::Ptr _session, const std::string& request, void* addInfo)
+{
+    string response;
+    auto handler = this->GetHandler();
+    if (!handler)
+    {
+        return false;
+    }
+    auto statisticProtocolServer = dynamic_cast<StatisticProtocolServer*>(handler);
+    statisticProtocolServer->HandleChannelRequest(
+        request, response, [this, _session](dev::GROUP_ID _groupId) {
+            return checkSDKPermission(_groupId, _session->remotePublicKey());
+        });
+    SendResponse(response, addInfo);
+    return true;
+}
+
+void dev::ChannelRPCServer::onClientRegisterEventLogRequest(
     dev::channel::ChannelSession::Ptr session, dev::channel::Message::Ptr message)
 {
     try
@@ -447,7 +476,7 @@ void dev::ChannelRPCServer::onClientEventLogRequest(
         auto protocolVersion = static_cast<uint32_t>(session->protocolVersion());
 
         auto respCallback = [serverRef, sessionRef](const std::string& _filterID, int32_t _result,
-                                const Json::Value& _logs) {
+                                const Json::Value& _logs, GROUP_ID const& _groupId) {
             auto server = serverRef.lock();
             auto session = sessionRef.lock();
 
@@ -462,6 +491,10 @@ void dev::ChannelRPCServer::onClientEventLogRequest(
                 auto resp = writer.write(jsonResp);
 
                 auto channelMessage = server->messageFactory()->buildMessage();
+
+                // only used for network statistic
+                channelMessage->setGroupID(_groupId);
+
                 channelMessage->setType(EVENT_LOG_PUSH);
                 channelMessage->setResult(0);
                 channelMessage->setSeq(std::string(32, '0'));
@@ -480,16 +513,31 @@ void dev::ChannelRPCServer::onClientEventLogRequest(
             return false;
         };
 
-        auto activeCallback = [serverRef, sessionRef]() {
+        auto sessionCheckerCallback = [this, serverRef, sessionRef](GROUP_ID _groupId) {
             auto server = serverRef.lock();
             auto session = sessionRef.lock();
-            return server && session && session->actived();
+            auto sessionActived = server && session && session->actived();
+            if (!sessionActived)
+            {
+                CHANNEL_LOG(DEBUG) << LOG_DESC("Push event failed for session invactived")
+                                   << LOG_KV("groupId", _groupId);
+                return dev::event::filter_status::CALLBACK_FAILED;
+            }
+            if (!checkSDKPermission(_groupId, session->remotePublicKey()))
+            {
+                return dev::event::filter_status::REMOTE_PEERS_ACCESS_DENIED;
+            }
+            return dev::event::filter_status::CHECK_VALID;
         };
 
-        int32_t ret = m_eventFilterCallBack(data, protocolVersion, respCallback, activeCallback);
+        // checkSDKPermission when receive CLIENT_REGISTER_EVENT_LOG
+        int32_t ret = m_eventFilterCallBack(data, protocolVersion, respCallback,
+            sessionCheckerCallback, [this, session](dev::GROUP_ID _groupId) {
+                return checkSDKPermission(_groupId, session->remotePublicKey());
+            });
 
-        CHANNEL_LOG(TRACE) << "onClientEventLogRequest" << LOG_KV("seq", seq) << LOG_KV("ret", ret)
-                           << LOG_KV("request", data);
+        CHANNEL_LOG(TRACE) << "onClientRegisterEventLogRequest" << LOG_KV("seq", seq)
+                           << LOG_KV("ret", ret) << LOG_KV("request", data);
 
         // send event register request back
         Json::Value response;
@@ -508,7 +556,48 @@ void dev::ChannelRPCServer::onClientEventLogRequest(
     }
     catch (std::exception& e)
     {
-        CHANNEL_LOG(ERROR) << "onClientEventLogRequest" << boost::diagnostic_information(e);
+        CHANNEL_LOG(ERROR) << "onClientRegisterEventLogRequest" << boost::diagnostic_information(e);
+    }
+}
+
+void dev::ChannelRPCServer::onClientUnregisterEventLogRequest(
+    dev::channel::ChannelSession::Ptr session, dev::channel::Message::Ptr message)
+{
+    try
+    {
+        auto seq = message->seq();
+        uint8_t topicLen = *((uint8_t*)message->data());
+        // skip topic field
+        std::string data(message->data() + topicLen, message->data() + message->dataSize());
+        auto protocolVersion = static_cast<uint32_t>(session->protocolVersion());
+
+        int32_t ret = m_eventCancelFilterCallBack(
+            data, protocolVersion, [this, session](dev::GROUP_ID _groupId) {
+                return checkSDKPermission(_groupId, session->remotePublicKey());
+            });
+
+        CHANNEL_LOG(TRACE) << "onClientUnregisterEventLogRequest" << LOG_KV("seq", seq)
+                           << LOG_KV("ret", ret) << LOG_KV("request", data);
+
+        // send event unregister request back
+        Json::Value response;
+        response["result"] = ret;
+        Json::FastWriter writer;
+        auto resp = writer.write(response);
+
+        std::shared_ptr<dev::channel::TopicChannelMessage> message =
+            std::make_shared<dev::channel::TopicChannelMessage>();
+        message->setType(CLIENT_UNREGISTER_EVENT_LOG);
+        message->setSeq(seq);
+        message->setResult(0);
+        message->setTopicData(std::string(""), (const byte*)resp.data(), resp.size());
+
+        session->asyncSendMessage(message, dev::channel::ChannelSession::CallbackType(), 0);
+    }
+    catch (std::exception& e)
+    {
+        CHANNEL_LOG(ERROR) << "onClientUnregisterEventLogRequest"
+                           << boost::diagnostic_information(e);
     }
 }
 
@@ -643,9 +732,21 @@ void dev::ChannelRPCServer::asyncPushChannelMessageHandler(
     }
 }
 
+// Note: No restrictions on AMOP traffic between nodes
 void dev::ChannelRPCServer::onNodeChannelRequest(
     dev::network::NetworkException, std::shared_ptr<p2p::P2PSession> s, p2p::P2PMessage::Ptr msg)
 {
+    NodeID nodeID;
+
+    if (s)
+    {
+        nodeID = s->nodeID();
+    }
+    else
+    {
+        nodeID = m_service->id();
+    }
+
     auto channelMessage = _server->messageFactory()->buildMessage();
     ssize_t result = channelMessage->decode(msg->buffer()->data(), msg->buffer()->size());
 
@@ -656,7 +757,7 @@ void dev::ChannelRPCServer::onNodeChannelRequest(
         return;
     }
 
-    CHANNEL_LOG(DEBUG) << "receive node request" << LOG_KV("from", s->nodeID())
+    CHANNEL_LOG(DEBUG) << "receive node request" << LOG_KV("from", nodeID)
                        << LOG_KV("length", msg->buffer()->size())
                        << LOG_KV("type", channelMessage->type())
                        << LOG_KV("seq", channelMessage->seq());
@@ -678,7 +779,6 @@ void dev::ChannelRPCServer::onNodeChannelRequest(
         {
             try
             {
-                auto nodeID = s->nodeID();
                 auto p2pMessage = msg;
                 auto service = m_service;
                 asyncPushChannelMessage(topic, channelMessage,
@@ -736,7 +836,7 @@ void dev::ChannelRPCServer::onNodeChannelRequest(
                 p2pResponse->setPacketType(0u);
                 p2pResponse->setSeq(msg->seq());
                 m_service->asyncSendMessageByNodeID(
-                    s->nodeID(), p2pResponse, CallbackFuncWithSession(), dev::network::Options());
+                    nodeID, p2pResponse, CallbackFuncWithSession(), dev::network::Options());
             }
         }
         else if (channelMessage->type() == AMOP_MULBROADCAST)
@@ -801,6 +901,41 @@ void dev::ChannelRPCServer::onClientTopicRequest(
     }
 }
 
+bool dev::ChannelRPCServer::limitAMOPBandwidth(dev::channel::ChannelSession::Ptr _session,
+    dev::channel::Message::Ptr _AMOPReq, dev::p2p::P2PMessage::Ptr _p2pMessage)
+{
+    int64_t requiredPermitsAfterCompress = _p2pMessage->length() / g_BCOSConfig.c_compressRate;
+    if (!m_networkBandwidthLimiter)
+    {
+        return true;
+    }
+    if (m_networkBandwidthLimiter->tryAcquire(requiredPermitsAfterCompress))
+    {
+        _p2pMessage->setPermitsAcquired(true);
+        return true;
+    }
+    CHANNEL_LOG(INFO) << LOG_BADGE("limitAMOPBandwidth: over bandwidth limitation")
+                      << LOG_KV("requiredPermitsAfterCompress", requiredPermitsAfterCompress)
+                      << LOG_KV("maxPermitsPerSecond(Bytes)", m_networkBandwidthLimiter->maxQPS())
+                      << LOG_KV("seq", _AMOPReq->seq().substr(0, c_seqAbridgedLen));
+    // send REJECT_AMOP_REQ_FOR_OVER_BANDWIDTHLIMIT to client
+    sendRejectAMOPResponse(_session, _AMOPReq);
+    return false;
+}
+
+void dev::ChannelRPCServer::sendRejectAMOPResponse(
+    dev::channel::ChannelSession::Ptr _session, dev::channel::Message::Ptr _AMOPReq)
+{
+    CHANNEL_LOG(INFO) << LOG_BADGE("sendRejectAMOPResponse")
+                      << LOG_DESC("Reject AMOP Request for over bandwidth limitation")
+                      << LOG_KV("seq", _AMOPReq->seq().substr(0, c_seqAbridgedLen));
+    auto response = _AMOPReq;
+    response->clearData();
+    response->setType(AMOP_RESPONSE);
+    response->setResult(REJECT_AMOP_REQ_FOR_OVER_BANDWIDTHLIMIT);
+    _session->asyncSendMessage(response, dev::channel::ChannelSession::CallbackType(), 0);
+}
+
 void dev::ChannelRPCServer::onClientChannelRequest(
     dev::channel::ChannelSession::Ptr session, dev::channel::Message::Ptr message)
 {
@@ -834,10 +969,17 @@ void dev::ChannelRPCServer::onClientChannelRequest(
             p2pMessage->setProtocolID(dev::eth::ProtocolID::AMOP);
             p2pMessage->setPacketType(0u);
 
+            // Exceed the bandwidth-limit, return REJECT_AMOP_REQ_FOR_OVER_BANDWIDTHLIMIT AMOP
+            // response
+            if (!limitAMOPBandwidth(session, message, p2pMessage))
+            {
+                return;
+            }
             dev::network::Options options;
             options.timeout = 30 * 1000;  // 30 seconds
 
-            m_service->asyncSendMessageByTopic(topic, p2pMessage,
+            m_service->asyncSendMessageByTopic(
+                topic, p2pMessage,
                 [session, message](dev::network::NetworkException e,
                     std::shared_ptr<dev::p2p::P2PSession>, dev::p2p::P2PMessage::Ptr response) {
                     if (e.errorCode())
@@ -883,8 +1025,8 @@ void dev::ChannelRPCServer::onClientChannelRequest(
         {
             CHANNEL_LOG(DEBUG) << "channel2 multicast request"
                                << LOG_KV("seq", message->seq().substr(0, c_seqAbridgedLen));
-
             auto buffer = std::make_shared<bytes>();
+
             message->encode(*buffer);
 
             auto p2pMessage = std::dynamic_pointer_cast<p2p::P2PMessage>(
@@ -893,8 +1035,15 @@ void dev::ChannelRPCServer::onClientChannelRequest(
             p2pMessage->setProtocolID(dev::eth::ProtocolID::AMOP);
             p2pMessage->setPacketType(1u);
 
-            m_service->asyncMulticastMessageByTopic(topic, p2pMessage);
-
+            // Exceed the bandwidth limit, return REJECT_AMOP_REQ_FOR_OVER_BANDWIDTHLIMIT AMOP
+            // response
+            bool sended = m_service->asyncMulticastMessageByTopic(
+                topic, p2pMessage, m_networkBandwidthLimiter);
+            if (!sended)
+            {
+                sendRejectAMOPResponse(session, message);
+                return;
+            }
             message->setType(AMOP_RESPONSE);
             message->setResult(0);
             session->asyncSendMessage(message, dev::channel::ChannelSession::CallbackType(), 0);
@@ -1064,7 +1213,7 @@ void ChannelRPCServer::asyncPushChannelMessage(std::string topic,
                         std::placeholders::_2);
                 session->asyncSendMessage(m_message, fp, 5000);
 
-                CHANNEL_LOG(INFO) << "Push channel message success"
+                CHANNEL_LOG(INFO) << "Push message success"
                                   << LOG_KV("seq", m_message->seq().substr(0, c_seqAbridgedLen))
                                   << LOG_KV("session", session->host()) << ":" << session->port();
                 m_currentSession = session;
@@ -1105,16 +1254,16 @@ void ChannelRPCServer::asyncBroadcastChannelMessage(
         CHANNEL_LOG(TRACE) << "no session use topic" << LOG_KV("topic", topic);
         return;
     }
-
+    stringstream ss;
     for (auto session : activedSessions)
     {
         session->asyncSendMessage(
             message, std::function<void(dev::channel::ChannelException, Message::Ptr)>(), 0);
-
-        CHANNEL_LOG(INFO) << "Push channel message success" << LOG_KV("topic", topic)
-                          << LOG_KV("seq", message->seq().substr(0, c_seqAbridgedLen))
-                          << LOG_KV("session", session->host()) << ":" << session->port();
+        ss << session->host() << ":" << session->port() << ",";
     }
+    CHANNEL_LOG(INFO) << "Push message success" << LOG_KV("topic", topic)
+                      << LOG_KV("seq", message->seq().substr(0, c_seqAbridgedLen))
+                      << LOG_KV("session", ss.str());
 }
 
 dev::channel::TopicChannelMessage::Ptr ChannelRPCServer::pushChannelMessage(
@@ -1201,4 +1350,58 @@ std::vector<dev::channel::ChannelSession::Ptr> ChannelRPCServer::getSessionByTop
     }
 
     return activedSessions;
+}
+
+void ChannelRPCServer::registerSDKAllowListByGroupId(
+    dev::GROUP_ID const& _groupId, dev::PeerWhitelist::Ptr _allowList)
+{
+    CHANNEL_LOG(INFO) << LOG_DESC("registerSDKAllowListByGroupId") << LOG_KV("groupId", _groupId)
+                      << LOG_KV("size", _allowList->size());
+    WriteGuard l(x_group2SDKAllowList);
+    if (_allowList->size() == 0)
+    {
+        CHANNEL_LOG(INFO) << LOG_DESC(
+            "Disable group-level sdk permission control for sdk allowlist is empty");
+        if (m_group2SDKAllowList->count(_groupId))
+        {
+            m_group2SDKAllowList->erase(_groupId);
+        }
+        return;
+    }
+    (*m_group2SDKAllowList)[_groupId] = _allowList;
+}
+
+void ChannelRPCServer::removeSDKAllowListByGroupId(dev::GROUP_ID const& _groupId)
+{
+    if (!m_group2SDKAllowList)
+    {
+        return;
+    }
+    CHANNEL_LOG(INFO) << LOG_DESC("removeSDKAllowListByGroupId") << LOG_KV("groupId", _groupId);
+    UpgradableGuard l(x_group2SDKAllowList);
+    if (m_group2SDKAllowList->count(_groupId))
+    {
+        UpgradeGuard ul(l);
+        m_group2SDKAllowList->erase(_groupId);
+    }
+}
+
+bool ChannelRPCServer::checkSDKPermission(dev::GROUP_ID _groupId, dev::h512 const& _sdkPublicKey)
+{
+    if (-1 == _groupId)
+    {
+        return true;
+    }
+    // SDK allowlist is not set
+    auto allowList = getSDKAllowListByGroupId(_groupId);
+    if (!allowList)
+    {
+        return true;
+    }
+    // check if the requesting SDK is on the allowlist
+    if (allowList->has(_sdkPublicKey))
+    {
+        return true;
+    }
+    return false;
 }

@@ -30,19 +30,29 @@
 #include "libp2p/P2PInterface.h"       // for CallbackFunc...
 #include "libp2p/P2PMessageFactory.h"  // for P2PMessageFa...
 #include "libp2p/P2PSession.h"         // for P2PSession
+#include <libstat/NetworkStatHandler.h>
 #include <boost/random.hpp>
 #include <unordered_map>
 
 using namespace dev;
 using namespace dev::p2p;
 using namespace dev::network;
+using namespace dev::stat;
 
 static const uint32_t CHECK_INTERVEL = 10000;
 
 Service::Service()
   : m_topics(std::make_shared<std::set<std::string>>()),
     m_protocolID2Handler(std::make_shared<std::unordered_map<uint32_t, CallbackFuncWithSession>>()),
-    m_topic2Handler(std::make_shared<std::unordered_map<std::string, CallbackFuncWithSession>>())
+    m_protocolID2DisconnectHandler(
+        std::make_shared<std::unordered_map<uint32_t, DisconnectCallbackFuncWithSession>>()),
+    m_topic2Handler(std::make_shared<std::unordered_map<std::string, CallbackFuncWithSession>>()),
+    m_group2NetworkStatHandler(std::make_shared<std::map<GROUP_ID, NetworkStatHandler::Ptr>>()),
+    m_group2BandwidthLimiter(
+        std::make_shared<std::map<GROUP_ID, dev::flowlimit::RateLimiter::Ptr>>()),
+    m_localAMOPCallbacks(std::make_shared<
+        std::unordered_map<uint32_t, std::pair<std::shared_ptr<boost::asio::deadline_timer>,
+                                         dev::p2p::CallbackFuncWithSession>>>())
 {}
 
 void Service::start()
@@ -113,24 +123,19 @@ void Service::heartBeat()
         if (it.second == id())
         {
             SERVICE_LOG(DEBUG) << LOG_DESC("heartBeat ignore myself nodeID same")
-                               << LOG_KV("remote endpoint", it.first.name())
+                               << LOG_KV("remote endpoint", it.first)
                                << LOG_KV("nodeID", it.second.abridged());
             continue;
         }
         if (it.second != NodeID() && isConnected(it.second))
         {
             SERVICE_LOG(DEBUG) << LOG_DESC("heartBeat ignore connected")
-                               << LOG_KV("endpoint", it.first.name())
+                               << LOG_KV("endpoint", it.first)
                                << LOG_KV("nodeID", it.second.abridged());
             continue;
         }
-        if (it.first.host.empty() || it.first.port.empty())
-        {
-            SERVICE_LOG(DEBUG) << LOG_DESC("heartBeat ignore invalid address");
-            continue;
-        }
         SERVICE_LOG(DEBUG) << LOG_DESC("heartBeat try to reconnect")
-                           << LOG_KV("endpoint", it.first.name());
+                           << LOG_KV("endpoint", it.first);
         m_host->asyncConnect(
             it.first, std::bind(&Service::onConnect, shared_from_this(), std::placeholders::_1,
                           std::placeholders::_2, std::placeholders::_3));
@@ -207,14 +212,13 @@ void Service::updateStaticNodes(
     if (it != m_staticNodes.end())
     {
         SERVICE_LOG(DEBUG) << LOG_DESC("updateStaticNodes") << LOG_KV("nodeID", nodeID.abridged())
-                           << LOG_KV("endpoint", endpoint.name());
+                           << LOG_KV("endpoint", endpoint);
         it->second = nodeID;
     }
     else
     {
         SERVICE_LOG(DEBUG) << LOG_DESC("updateStaticNodes can't find endpoint")
-                           << LOG_KV("nodeID", nodeID.abridged())
-                           << LOG_KV("endpoint", endpoint.name());
+                           << LOG_KV("nodeID", nodeID.abridged()) << LOG_KV("endpoint", endpoint);
     }
 }
 
@@ -222,15 +226,23 @@ void Service::onConnect(dev::network::NetworkException e, dev::network::NodeInfo
     std::shared_ptr<dev::network::SessionFace> session)
 {
     NodeID nodeID = nodeInfo.nodeID;
+    std::string peer = "unknown";
+    if (session)
+    {
+        peer = session->nodeIPEndpoint().address();
+    }
     if (e.errorCode())
     {
         SERVICE_LOG(WARNING) << LOG_DESC("onConnect") << LOG_KV("errorCode", e.errorCode())
+                             << LOG_KV("nodeID", nodeID.abridged())
+                             << LOG_KV("nodeName", nodeInfo.nodeName) << LOG_KV("endpoint", peer)
                              << LOG_KV("what", e.what());
 
         return;
     }
 
-    SERVICE_LOG(TRACE) << LOG_DESC("Service onConnect") << LOG_KV("nodeID", nodeID.abridged());
+    SERVICE_LOG(TRACE) << LOG_DESC("Service onConnect") << LOG_KV("nodeID", nodeID.abridged())
+                       << LOG_KV("endpoint", peer);
 
     RecursiveGuard l(x_sessions);
     auto it = m_sessions.find(nodeID);
@@ -267,18 +279,37 @@ void Service::onConnect(dev::network::NetworkException e, dev::network::NodeInfo
         m_sessions.insert(std::make_pair(nodeID, p2pSession));
     }
     SERVICE_LOG(INFO) << LOG_DESC("Connection established") << LOG_KV("nodeID", nodeID.abridged())
-                      << LOG_KV("endpoint", session->nodeIPEndpoint().name());
+                      << LOG_KV("endpoint", session->nodeIPEndpoint());
+}
+
+void Service::callDisconnectHandlers(dev::network::NetworkException _e, P2PSession::Ptr _p2pSession)
+{
+    ReadGuard l(x_protocolID2DisconnectHandler);
+    for (auto it : *m_protocolID2DisconnectHandler)
+    {
+        SERVICE_LOG(DEBUG) << LOG_DESC("callDisconnectHandlers")
+                           << LOG_KV("protocol", std::to_string(it.first))
+                           << LOG_KV("peer", _p2pSession->nodeID().abridged());
+        auto disconnectCallback = it.second;
+        m_host->threadPool()->enqueue([disconnectCallback, _p2pSession, _e]() {
+            if (disconnectCallback)
+            {
+                disconnectCallback(_e, _p2pSession);
+            }
+        });
+    }
 }
 
 void Service::onDisconnect(dev::network::NetworkException e, P2PSession::Ptr p2pSession)
 {
+    callDisconnectHandlers(e, p2pSession);
     RecursiveGuard l(x_sessions);
     auto it = m_sessions.find(p2pSession->nodeID());
     if (it != m_sessions.end() && it->second == p2pSession)
     {
         SERVICE_LOG(TRACE) << "Service onDisconnect and remove from m_sessions"
                            << LOG_KV("nodeID", p2pSession->nodeID().abridged())
-                           << LOG_KV("endpoint", p2pSession->session()->nodeIPEndpoint().name());
+                           << LOG_KV("endpoint", p2pSession->session()->nodeIPEndpoint());
 
         m_sessions.erase(it);
         if (e.errorCode() == dev::network::P2PExceptionType::DuplicateSession)
@@ -302,34 +333,50 @@ void Service::onMessage(dev::network::NetworkException e, dev::network::SessionF
 {
     try
     {
+        NodeID nodeID = id();
+        NodeIPEndpoint nodeIPEndpoint(boost::asio::ip::address(), 0);
+        if (session && p2pSession)
+        {
+            nodeID = p2pSession->nodeID();
+            nodeIPEndpoint = session->nodeIPEndpoint();
+        }
+
         if (e.errorCode())
         {
             SERVICE_LOG(WARNING) << LOG_DESC("disconnect error P2PSession")
-                                 << LOG_KV("nodeID", p2pSession->nodeID().abridged())
-                                 << LOG_KV("endpoint", session->nodeIPEndpoint().name())
+                                 << LOG_KV("nodeID", nodeID.abridged())
+                                 << LOG_KV("endpoint", nodeIPEndpoint)
                                  << LOG_KV("errorCode", e.errorCode()) << LOG_KV("what", e.what());
 
-            p2pSession->stop(dev::network::UserReason);
-            onDisconnect(e, p2pSession);
+            if (p2pSession)
+            {
+                p2pSession->stop(dev::network::UserReason);
+                onDisconnect(e, p2pSession);
+            }
             return;
-        }
-
-        // update the network-in packets information
-        if (m_statisticHandler)
-        {
-            auto p2pMessage = std::dynamic_pointer_cast<P2PMessage>(message);
-            m_statisticHandler->updateServiceInPackets(p2pMessage);
         }
 
         /// SERVICE_LOG(TRACE) << "Service onMessage: " << message->seq();
-
         auto p2pMessage = std::dynamic_pointer_cast<P2PMessage>(message);
 
         // AMOP topic message, redirect to p2psession
-        if (abs(p2pMessage->protocolID()) == dev::eth::ProtocolID::Topic)
+        if (p2pSession && abs(p2pMessage->protocolID()) == dev::eth::ProtocolID::Topic)
         {
             p2pSession->onTopicMessage(p2pMessage);
             return;
+        }
+
+        // AMOP-incoming-network-traffic between nodes
+        bool isAMOPMessage =
+            (abs(p2pMessage->protocolID()) == dev::eth::ProtocolID::AMOP ? true : false);
+        if (m_channelNetworkStatHandler && isAMOPMessage)
+        {
+            m_channelNetworkStatHandler->updateAMOPInTraffic(p2pMessage->length());
+        }
+        // P2P messages within the group, statistics of network traffic
+        if (g_BCOSConfig.enableStat() && !isAMOPMessage)
+        {
+            updateIncomingTraffic(p2pMessage);
         }
 
         if (p2pMessage->isRequestPacket())
@@ -424,16 +471,101 @@ P2PMessage::Ptr Service::sendMessageByNodeID(NodeID nodeID, P2PMessage::Ptr mess
     return P2PMessage::Ptr();
 }
 
+void Service::onLocalAMOPMessage(
+    P2PMessage::Ptr message, CallbackFuncWithSession callback, dev::network::Options options)
+{
+    if (message->isRequestPacket())
+    {
+        if (callback)
+        {
+            // save callback and call onMessage to push the request message
+            RecursiveGuard lock(x_localAMOPCallbacks);
+
+            auto self = shared_from_this();
+            std::shared_ptr<boost::asio::deadline_timer> timer;
+            if (options.timeout > 0)
+            {
+                timer = m_host->asioInterface()->newTimer(options.timeout);
+                timer->async_wait([self, message](const boost::system::error_code& error) {
+                    if (error)
+                    {
+                        SERVICE_LOG(TRACE) << "timer canceled" << LOG_KV("errorCode", error);
+                        return;
+                    }
+
+
+                    SERVICE_LOG(INFO) << "AMOP Local message Timeout: " << message->seq();
+
+                    RecursiveGuard lock(self->localAMOPCallbacksLock());
+                    auto it = self->localAMOPCallbacks()->find(message->seq());
+                    if (it != self->localAMOPCallbacks()->end())
+                    {
+                        auto callback = it->second.second;
+                        self->host()->threadPool()->enqueue([callback] {
+                            callback(dev::network::NetworkException(
+                                         P2PExceptionType::NetworkTimeout, "NetworkTimeout"),
+                                std::shared_ptr<dev::p2p::P2PSession>(), P2PMessage::Ptr());
+                        });
+
+                        self->localAMOPCallbacks()->erase(it);
+                    }
+                });
+            }
+
+            m_localAMOPCallbacks->insert(
+                std::make_pair(message->seq(), std::make_pair(timer, callback)));
+        }
+
+        onMessage(NetworkException(), dev::network::SessionFace::Ptr(), message,
+            dev::p2p::P2PSession::Ptr());
+    }
+    else
+    {
+        // find callback and push response message
+        RecursiveGuard lock(x_localAMOPCallbacks);
+
+        auto it = m_localAMOPCallbacks->find(message->seq());
+        if (it != m_localAMOPCallbacks->end())
+        {
+            if (it->second.first)
+            {
+                it->second.first->cancel();
+            }
+
+            auto amopCallback = it->second.second;
+
+            if (amopCallback)
+            {
+                m_host->threadPool()->enqueue([amopCallback, message] {
+                    amopCallback(dev::network::NetworkException(),
+                        std::shared_ptr<dev::p2p::P2PSession>(), message);
+                });
+            }
+
+            m_localAMOPCallbacks->erase(it);
+        }
+    }
+}
+
 void Service::asyncSendMessageByNodeID(NodeID nodeID, P2PMessage::Ptr message,
     CallbackFuncWithSession callback, dev::network::Options options)
 {
     try
     {
+        bool isAMOPMessage =
+            (abs(message->protocolID()) == dev::eth::ProtocolID::AMOP ? true : false);
+
         if (nodeID == id())
         {
-            // exclude myself
+            // ignore myself but amop
+            if (isAMOPMessage)
+            {
+                onLocalAMOPMessage(message, callback, options);
+            }
+
             return;
         }
+
         RecursiveGuard l(x_sessions);
         auto it = m_sessions.find(nodeID);
 
@@ -460,11 +592,21 @@ void Service::asyncSendMessageByNodeID(NodeID nodeID, P2PMessage::Ptr message,
             {
                 session->session()->asyncSendMessage(message, options, nullptr);
             }
-            // update the network-out packets information
-            if (m_statisticHandler)
+            bool isAMOPMessage =
+                (abs(message->protocolID()) == dev::eth::ProtocolID::AMOP ? true : false);
+
+            // AMOP-outgoing-network-traffic between nodes
+            if (m_channelNetworkStatHandler && isAMOPMessage)
             {
-                m_statisticHandler->updateServiceOutPackets(message);
+                m_channelNetworkStatHandler->updateAMOPOutTraffic(message->length());
             }
+            // update stat information
+            if (g_BCOSConfig.enableStat() && !isAMOPMessage)
+            {
+                updateOutgoingTraffic(message);
+            }
+
+            acquirePermits(message);
         }
         else
         {
@@ -625,9 +767,27 @@ void Service::asyncSendMessageByTopic(std::string topic, P2PMessage::Ptr message
     topicStatus->onResponse(dev::network::NetworkException(), P2PSession::Ptr(), message);
 }
 
-void Service::asyncMulticastMessageByTopic(std::string topic, P2PMessage::Ptr message)
+bool Service::asyncMulticastMessageByTopic(
+    std::string topic, P2PMessage::Ptr message, dev::flowlimit::RateLimiter::Ptr _bandwidthLimiter)
 {
     NodeIDs nodeIDsToSend = getPeersByTopic(topic);
+    if (_bandwidthLimiter)
+    {
+        auto requiredPermits =
+            message->length() * nodeIDsToSend.size() / g_BCOSConfig.c_compressRate;
+        if (!_bandwidthLimiter->tryAcquire(requiredPermits))
+        {
+            SERVICE_LOG(INFO) << LOG_DESC(
+                                     "asyncMulticastMessageByTopic from channel failed for over "
+                                     "bandwidth limitation")
+                              << LOG_KV("requiredPermits", requiredPermits)
+                              << LOG_KV("maxPermitsPerSecond(Bytes)", _bandwidthLimiter->maxQPS())
+                              << LOG_KV("broadcastTargetSize", nodeIDsToSend.size())
+                              << LOG_KV("msgSize", message->length());
+            return false;
+        }
+        message->setPermitsAcquired(true);
+    }
     SERVICE_LOG(DEBUG) << LOG_DESC("asyncMulticastMessageByTopic")
                        << LOG_KV("nodes", nodeIDsToSend.size());
     try
@@ -643,6 +803,7 @@ void Service::asyncMulticastMessageByTopic(std::string topic, P2PMessage::Ptr me
         SERVICE_LOG(WARNING) << LOG_DESC("asyncMulticastMessageByTopic")
                              << LOG_KV("what", boost::diagnostic_information(e));
     }
+    return true;
 }
 
 void Service::asyncMulticastMessageByNodeIDList(NodeIDs nodeIDs, P2PMessage::Ptr message)
@@ -697,6 +858,34 @@ void Service::registerHandlerByProtoclID(PROTOCOL_ID protocolID, CallbackFuncWit
     else
     {
         it->second = handler;
+    }
+}
+
+void Service::registerDisconnectHandlerByProtocolID(
+    PROTOCOL_ID const& _protocolID, DisconnectCallbackFuncWithSession _disconnectHandler)
+{
+    SERVICE_LOG(DEBUG) << LOG_DESC("registerDisconnectHandlerByProtocolID")
+                       << LOG_KV("_protocolID", std::to_string(_protocolID));
+    WriteGuard l(x_protocolID2DisconnectHandler);
+    auto it = m_protocolID2DisconnectHandler->find(_protocolID);
+    if (it == m_protocolID2DisconnectHandler->end())
+    {
+        m_protocolID2DisconnectHandler->insert(std::make_pair(_protocolID, _disconnectHandler));
+    }
+    else
+    {
+        it->second = _disconnectHandler;
+    }
+}
+
+void Service::removeDisconnectHandlerByProtocolID(PROTOCOL_ID const& _protocolID)
+{
+    SERVICE_LOG(DEBUG) << LOG_DESC("removeDisconnectHandlerByProtocolID")
+                       << LOG_KV("_protocolID", std::to_string(_protocolID));
+    WriteGuard l(x_protocolID2DisconnectHandler);
+    if (m_protocolID2DisconnectHandler && m_protocolID2DisconnectHandler->count(_protocolID))
+    {
+        m_protocolID2DisconnectHandler->erase(_protocolID);
     }
 }
 
@@ -793,11 +982,16 @@ NodeIDs Service::getPeersByTopic(std::string const& topic)
         {
             for (auto& j : it.second->topics())
             {
-                if ((j.topic == topic) && (j.topicStatus == TopicStatus::VERIFYI_SUCCESS_STATUS))
+                if ((j.topic == topic) && (j.topicStatus == TopicStatus::VERIFY_SUCCESS_STATUS))
                 {
                     nodeList.push_back(it.first);
                 }
             }
+        }
+
+        if (m_topics->find(topic) != m_topics->end())
+        {
+            nodeList.push_back(id());
         }
     }
     catch (std::exception& e)
@@ -820,4 +1014,113 @@ bool Service::isConnected(NodeID const& nodeID) const
         return true;
     }
     return false;
+}
+
+
+void Service::appendNetworkStatHandlerByGroupID(
+    GROUP_ID const& _groupID, std::shared_ptr<dev::stat::NetworkStatHandler> _handler)
+{
+    UpgradableGuard l(x_group2NetworkStatHandler);
+    if (!m_group2NetworkStatHandler->count(_groupID))
+    {
+        UpgradeGuard ul(l);
+        (*m_group2NetworkStatHandler)[_groupID] = _handler;
+        return;
+    }
+    SERVICE_LOG(WARNING) << LOG_DESC("appendNetworkStatHandlerByGroupID: already exists")
+                         << LOG_KV("group", std::to_string(_groupID));
+}
+
+void Service::removeNetworkStatHandlerByGroupID(GROUP_ID const& _groupID)
+{
+    UpgradableGuard l(x_group2NetworkStatHandler);
+    if (m_group2NetworkStatHandler->count(_groupID))
+    {
+        UpgradeGuard ul(l);
+        m_group2NetworkStatHandler->erase(_groupID);
+        SERVICE_LOG(DEBUG) << LOG_DESC("removeNetworkStatHandlerByGroupID")
+                           << LOG_KV("group", std::to_string(_groupID));
+    }
+}
+
+void Service::updateIncomingTraffic(P2PMessage::Ptr _msg)
+{
+    // split groupID and moduleID from the _protocolID
+    auto ret = dev::eth::getGroupAndProtocol(abs(_msg->protocolID()));
+    auto networkStatHandler =
+        getHandlerByGroupId(ret.first, m_group2NetworkStatHandler, x_group2NetworkStatHandler);
+
+    if (networkStatHandler)
+    {
+        networkStatHandler->updateIncomingTraffic(ret.second, _msg->length());
+    }
+}
+
+void Service::updateOutgoingTraffic(P2PMessage::Ptr _msg)
+{
+    auto ret = dev::eth::getGroupAndProtocol(abs(_msg->protocolID()));
+    auto networkStatHandler =
+        getHandlerByGroupId(ret.first, m_group2NetworkStatHandler, x_group2NetworkStatHandler);
+    if (networkStatHandler)
+    {
+        networkStatHandler->updateOutgoingTraffic(ret.second, _msg->length());
+    }
+}
+
+void Service::acquirePermits(P2PMessage::Ptr _msg)
+{
+    if (_msg->permitsAcquired())
+    {
+        return;
+    }
+    if (m_nodeBandwidthLimiter)
+    {
+        m_nodeBandwidthLimiter->acquireWithoutWait(_msg->length());
+    }
+    // get groupId
+    auto ret = dev::eth::getGroupAndProtocol(abs(_msg->protocolID()));
+    auto bandwidthLimiter =
+        getHandlerByGroupId(ret.first, m_group2BandwidthLimiter, x_group2BandwidthLimiter);
+    if (!bandwidthLimiter)
+    {
+        return;
+    }
+    bandwidthLimiter->acquireWithoutWait(_msg->length());
+}
+
+void Service::setNodeBandwidthLimiter(dev::flowlimit::RateLimiter::Ptr _bandwidthLimiter)
+{
+    m_nodeBandwidthLimiter = _bandwidthLimiter;
+}
+
+
+void Service::registerGroupBandwidthLimiter(
+    GROUP_ID const& _groupID, dev::flowlimit::RateLimiter::Ptr _bandwidthLimiter)
+{
+    UpgradableGuard l(x_group2BandwidthLimiter);
+    if (m_group2BandwidthLimiter->count(_groupID))
+    {
+        SERVICE_LOG(DEBUG) << LOG_DESC("registerGroupBandwidthLimiter: already registered")
+                           << LOG_KV("group", std::to_string(_groupID));
+        return;
+    }
+    UpgradeGuard ul(l);
+    (*m_group2BandwidthLimiter)[_groupID] = _bandwidthLimiter;
+    SERVICE_LOG(INFO) << LOG_DESC("registerGroupBandwidthLimiter")
+                      << LOG_KV("group", std::to_string(_groupID));
+}
+
+void Service::removeGroupBandwidthLimiter(GROUP_ID const& _groupID)
+{
+    UpgradableGuard l(x_group2BandwidthLimiter);
+    if (!m_group2BandwidthLimiter->count(_groupID))
+    {
+        SERVICE_LOG(DEBUG) << LOG_DESC("removeGroupBandwidthLimiter: already removed")
+                           << LOG_KV("group", std::to_string(_groupID));
+        return;
+    }
+    UpgradeGuard ul(l);
+    m_group2BandwidthLimiter->erase(_groupID);
+    SERVICE_LOG(INFO) << LOG_DESC("removeGroupBandwidthLimiter")
+                      << LOG_KV("group", std::to_string(_groupID));
 }

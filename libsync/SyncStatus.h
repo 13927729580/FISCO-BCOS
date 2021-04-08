@@ -23,6 +23,7 @@
 #include "Common.h"
 #include "DownloadingBlockQueue.h"
 #include "RspBlockReq.h"
+#include "SyncMsgPacket.h"
 #include <libblockchain/BlockChainInterface.h>
 #include <libdevcore/FixedHash.h>
 #include <libdevcore/Worker.h>
@@ -30,7 +31,6 @@
 #include <libnetwork/Common.h>
 #include <libnetwork/Session.h>
 #include <libp2p/P2PInterface.h>
-#include <libp2p/StatisticHandler.h>
 #include <libtxpool/TxPoolInterface.h>
 #include <map>
 #include <queue>
@@ -62,20 +62,20 @@ public:
         latestHash(_latestHash),
         reqQueue(_nodeId)
     {}
-    SyncPeerStatus(const SyncPeerInfo& _info, PROTOCOL_ID)
-      : nodeId(_info.nodeId),
-        number(_info.number),
-        genesisHash(_info.genesisHash),
-        latestHash(_info.latestHash),
-        reqQueue(_info.nodeId)
+    SyncPeerStatus(SyncStatusPacket::Ptr _info, PROTOCOL_ID)
+      : nodeId(_info->nodeId),
+        number(_info->number),
+        genesisHash(_info->genesisHash),
+        latestHash(_info->latestHash),
+        reqQueue(_info->nodeId)
     {}
 
-    void update(const SyncPeerInfo& _info)
+    void update(SyncStatusPacket::Ptr _info)
     {
-        nodeId = _info.nodeId;
-        number = _info.number;
-        genesisHash = _info.genesisHash;
-        latestHash = _info.latestHash;
+        nodeId = _info->nodeId;
+        number = _info->number;
+        genesisHash = _info->genesisHash;
+        latestHash = _info->latestHash;
     }
 
 public:
@@ -112,7 +112,7 @@ public:
 
     bool hasPeer(NodeID const& _id);
 
-    bool newSyncPeerStatus(SyncPeerInfo const& _info);
+    bool newSyncPeerStatus(SyncStatusPacket::Ptr _info);
 
     void deletePeer(NodeID const& _id);
 
@@ -141,11 +141,6 @@ public:
         size_t _maxChosenSize, std::function<bool(std::shared_ptr<SyncPeerStatus>)> const& _allow);
 
     DownloadingBlockQueue& bq() { return m_downloadingBlockQueue; }
-
-    void setStatHandlerForDownloadingBlockQueue(dev::p2p::StatisticHandler::Ptr _statisticHandler)
-    {
-        m_downloadingBlockQueue.setStatHandler(_statisticHandler);
-    }
 
 private:
     int64_t selectPeers(int64_t const& _neighborSize, std::shared_ptr<NodeIDs> _nodeIds);

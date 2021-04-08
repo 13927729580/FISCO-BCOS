@@ -29,6 +29,7 @@
 #include <clocale>
 #include <iostream>
 #include <memory>
+#include <thread>
 
 using namespace std;
 using namespace dev;
@@ -47,6 +48,11 @@ void checkAndCall(const std::string& configPath, shared_ptr<Initializer> initial
         cout << "Reset certificate whitelist(CAL)" << endl;
         initializer->p2pInitializer()->resetWhitelist(configPath);
     });
+    std::string resetSDKAllowListSignal = configPath + ".reset_allowlist";
+    dev::FileSignal::callIfFileExist(resetSDKAllowListSignal, [&]() {
+        cout << "Reset sdk allowList(public keys)" << endl;
+        initializer->ledgerInitializer()->reloadSDKAllowList();
+    });
 }
 
 int main(int argc, const char* argv[])
@@ -57,8 +63,6 @@ int main(int argc, const char* argv[])
         std::cerr << "terminate handler called" << endl;
         abort();
     });
-    /// init params
-    string configPath = initCommandLine(argc, argv);
     // get datetime and output welcome info
     ExitHandler exitHandler;
     signal(SIGTERM, &ExitHandler::exitHandler);
@@ -66,8 +70,11 @@ int main(int argc, const char* argv[])
     signal(SIGINT, &ExitHandler::exitHandler);
     /// callback initializer to init all ledgers
     auto initialize = std::make_shared<Initializer>();
+    std::string configPath("./config.ini");
     try
     {
+        /// init params
+        configPath = initCommandLine(argc, argv);
         std::cout << "[" << getCurrentDateTime() << "] ";
         std::cout << "Initializing..." << std::endl;
         initialize->init(configPath);
@@ -85,7 +92,6 @@ int main(int argc, const char* argv[])
     {
         checkAndCall(configPath, initialize);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        LogInitializer::logRotateByTime();
     }
     initialize.reset();
     std::cout << "[" << getCurrentDateTime() << "] ";

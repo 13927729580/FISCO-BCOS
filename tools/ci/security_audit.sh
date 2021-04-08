@@ -7,7 +7,10 @@ ignore_files=(tools/ EventLogFilterTest cmake LedgerTest.cpp FakeModule.h SyncMa
 verifierMain.cpp consensus_main.cpp sync_main.cpp ExecuteResultTest.cpp trie.cpp CommonJS.cpp \
 EthCoreCommonJS.cpp HostTest.cpp PeerWhitelist.cpp Common.cpp test_Service.cpp FakeSyncToolsSet.h \
 test_ConsensusPrecompiled.cpp RpcTest.cpp .genesis test_PermissionPrecompiled.cpp test_PaillierPrecompiled.cpp \
-test_ConsensusPrecompiled.cpp BlockChainImpTest.cpp)
+test_ConsensusPrecompiled.cpp BlockChainImpTest.cpp test_KVTablePrecompiled.cpp test_CNSPrecompiled.cpp \
+TransactionTest.cpp test_ChainGovernancePrecompiled.cpp OutputTest.cpp CMakeLists.txt AES.cpp \
+SM4Crypto.cpp Hash.cpp VMTest.cpp ExecuteVMTest.cpp InterpreterTest.cpp SM2Signature.cpp \
+ECDSASignature.cpp LogEntry.cpp PrecompiledTest.cpp)
 
 LOG_ERROR() {
     content=${1}
@@ -40,7 +43,7 @@ scan_code()
         if should_ignore ${file}; then continue; fi
         if [ ! -f ${file} ];then continue; fi
         LOG_INFO "check file ${file}"
-        python ${scan_code_script} $file 
+        python ${scan_code_script} "$file"
         trigger_rules=$(jq -r '.' /tmp/report.json | grep 'trigger_rules' | awk '{print $2}' | sed 's/,//g')
         count=$((count+trigger_rules))
         echo "trigger_rules is ${trigger_rules}"

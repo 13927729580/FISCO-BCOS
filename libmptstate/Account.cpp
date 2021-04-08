@@ -20,8 +20,8 @@
  */
 
 #include "Account.h"
+#include "libdevcrypto/CryptoInterface.h"
 #include <libdevcore/CommonIO.h>
-#include <libethcore/ChainOperationParams.h>
 #include <libethcore/Precompiled.h>
 
 using namespace std;
@@ -35,5 +35,5 @@ void Account::setCode(bytes&& _code)
 {
     m_codeCache = std::move(_code);
     m_hasNewCode = true;
-    m_codeHash = sha3(m_codeCache);
+    m_codeHash = crypto::Hash(m_codeCache);
 }

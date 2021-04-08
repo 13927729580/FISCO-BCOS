@@ -23,9 +23,9 @@
 #include "StorageException.h"
 #include <libdevcore/Common.h>
 #include <libdevcore/FixedHash.h>
-#include <tbb/concurrent_unordered_set.h>
 #include <tbb/concurrent_vector.h>
 #include <tbb/parallel_for.h>
+#include <tbb/parallel_for_each.h>
 #include <tbb/parallel_sort.h>
 #include <thread>
 
@@ -105,6 +105,9 @@ CachedStorage::CachedStorage(dev::GROUP_ID const& _groupID) : m_groupID(_groupID
     m_taskThreadPool =
         std::make_shared<dev::ThreadPool>("taskPool-" + std::to_string(m_groupID), 1);
 
+    m_asyncThreadPool =
+        std::make_shared<dev::ThreadPool>("touchMRU-" + std::to_string(m_groupID), 1);
+
     m_mruQueue =
         std::make_shared<tbb::concurrent_queue<std::tuple<std::string, std::string, ssize_t>>>();
     m_mru = std::make_shared<boost::multi_index_container<std::pair<std::string, std::string>,
@@ -173,7 +176,7 @@ std::tuple<std::shared_ptr<Cache::RWScoped>, Cache::Ptr> CachedStorage::selectNo
         }
         else
         {
-            CACHED_STORAGE_LOG(FATAL) << "CachedStorage needs a backend storage.";
+            CACHED_STORAGE_LOG(FATAL) << "backend storage doesn't set.";
         }
 
         return std::make_tuple(emptyScoped, cache);
@@ -204,7 +207,7 @@ std::tuple<std::shared_ptr<Cache::RWScoped>, Cache::Ptr> CachedStorage::selectNo
         }
         else
         {
-            CACHED_STORAGE_LOG(FATAL) << "CachedStorage needs a backend storage.";
+            CACHED_STORAGE_LOG(FATAL) << "backend storage doesn't set.";
         }
     }
     else
@@ -217,7 +220,7 @@ std::tuple<std::shared_ptr<Cache::RWScoped>, Cache::Ptr> CachedStorage::selectNo
 
 size_t CachedStorage::commit(int64_t num, const std::vector<TableData::Ptr>& datas)
 {
-    CACHED_STORAGE_LOG(INFO) << "CachedStorage commit: " << datas.size() << " num: " << num;
+    CACHED_STORAGE_LOG(INFO) << "commit: " << datas.size() << " num: " << num;
 
     tbb::atomic<size_t> total = 0;
 
@@ -291,8 +294,6 @@ size_t CachedStorage::commit(int64_t num, const std::vector<TableData::Ptr>& dat
                                             {
                                                 totalCapacity += it->capacity();
                                             }
-
-
                                             touchMRU(requestData->info->name, key, totalCapacity);
                                         }
 
@@ -361,13 +362,19 @@ size_t CachedStorage::commit(int64_t num, const std::vector<TableData::Ptr>& dat
                                     else
                                     {
                                         // impossible, should exit
+                                        stringstream ss;
+                                        ss << ", the cache of key:" << key << " has entries:";
+                                        for (auto it = caches->entries()->begin();
+                                             it != caches->entries()->end(); ++it)
+                                        {
+                                            ss << (*it)->getID() << " ";
+                                        }
                                         CACHED_STORAGE_LOG(FATAL)
                                             << "Can not find entry in cache, key:" << key
-                                            << LOG_KV("num", num) << ",id" << id
-                                            << " != " << (*entryIt)->getID();
+                                            << LOG_KV("num", num) << ",id " << id
+                                            << " != " << (*entryIt)->getID() << ss.str();
                                     }
                                 }
-
                                 touchMRU(requestData->info->name, key, change);
                             }
                         });
@@ -375,7 +382,7 @@ size_t CachedStorage::commit(int64_t num, const std::vector<TableData::Ptr>& dat
                                           commitData->dirtyEntries->size()),
                         [&](const tbb::blocked_range<size_t>& rangeEntries) {
                             for (size_t i = rangeEntries.begin(); i < rangeEntries.end(); ++i)
-                            {  // remove duplicate entries
+                            {  // remove duplicate entries, rocksdb need this
                                 if (duplicateIDs.find((*commitData->dirtyEntries)[i]->getID()) !=
                                     duplicateIDs.end())
                                 {
@@ -397,80 +404,98 @@ size_t CachedStorage::commit(int64_t num, const std::vector<TableData::Ptr>& dat
 
     TIME_RECORD("Process new entries");
     auto commitDatasSize = commitDatas->size();
-    for (size_t i = 0; i < commitDatasSize; ++i)
-    {
-        auto commitData = (*commitDatas)[i];
 
-        if (!commitData->info->enableCache)
-        {
-            continue;
-        }
+    // Cache the key corresponding to each table newEntries
+    std::shared_ptr<std::vector<tbb::concurrent_unordered_set<std::string>>> processedKeys =
+        std::make_shared<std::vector<tbb::concurrent_unordered_set<std::string>>>(
+            commitDatasSize, tbb::concurrent_unordered_set<std::string>());
 
-        auto newEntriesSize = commitData->newEntries->size();
-        for (size_t j = 0; j < newEntriesSize; ++j)
-        {
-            auto commitEntry = commitData->newEntries->get(j);
-            commitEntry->setNum(num);
-            ++total;
-
-            auto key = commitEntry->getField(commitData->info->key);
-
-            auto cacheEntry = std::make_shared<Entry>();
-            cacheEntry->copyFrom(commitEntry);
-
-            if (cacheEntry->force())
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, commitDatasSize),
+        [&](const tbb::blocked_range<size_t>& range) {
+            for (size_t i = range.begin(); i < range.end(); ++i)
             {
-                auto result = touchCache(commitData->info, key, true);
+                auto commitData = (*commitDatas)[i];
 
-                auto caches = std::get<1>(result);
-                caches->setNum(num);
-                caches->entries()->addEntry(cacheEntry);
-                caches->setEmpty(false);
-            }
-            else
-            {
-                auto result = touchCache(commitData->info, key, true);
-                auto caches = std::get<1>(result);
-                if (caches->empty())
+                if (!commitData->info->enableCache)
                 {
-                    if (m_backend)
-                    {
-                        auto conditionKey = std::make_shared<Condition>();
-                        conditionKey->EQ(commitData->info->key, key);
-                        auto backendData =
-                            m_backend->select(num, commitData->info, key, conditionKey);
+                    continue;
+                }
 
-                        CACHED_STORAGE_LOG(TRACE) << commitData->info->name << "-" << key
-                                                  << " miss the cache while commit new entries";
-
-                        caches->setEntries(backendData);
-
-                        size_t totalCapacity = 0;
-                        for (auto it : *backendData)
+                auto newEntriesSize = commitData->newEntries->size();
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, newEntriesSize),
+                    [&](const tbb::blocked_range<size_t>& range) {
+                        for (size_t j = range.begin(); j < range.end(); ++j)
                         {
-                            totalCapacity += it->capacity();
-                        }
+                            auto commitEntry = commitData->newEntries->get(j);
+                            commitEntry->setNum(num);
+                            ++total;
+
+                            auto key = commitEntry->getField(commitData->info->key);
+
+                            (*processedKeys)[i].insert(key);
+
+                            auto cacheEntry = std::make_shared<Entry>();
+                            cacheEntry->copyFrom(commitEntry);
+
+                            if (cacheEntry->force())
+                            {
+                                auto result = touchCache(commitData->info, key, true);
+
+                                auto caches = std::get<1>(result);
+                                caches->setNum(num);
+                                caches->entries()->addEntry(cacheEntry);
+                                caches->setEmpty(false);
+                            }
+                            else
+                            {
+                                auto result = touchCache(commitData->info, key, true);
+                                auto caches = std::get<1>(result);
+                                if (caches->empty())
+                                {
+                                    if (m_backend)
+                                    {
+                                        auto conditionKey = std::make_shared<Condition>();
+                                        conditionKey->EQ(commitData->info->key, key);
+                                        auto backendData = m_backend->select(
+                                            num, commitData->info, key, conditionKey);
+
+                                        CACHED_STORAGE_LOG(TRACE)
+                                            << commitData->info->name << "-" << key
+                                            << " miss the cache while commit new entries";
+
+                                        caches->setEntries(backendData);
+
+                                        size_t totalCapacity = 0;
+                                        for (auto it : *backendData)
+                                        {
+                                            totalCapacity += it->capacity();
+                                        }
 #if 0
                         CACHED_STORAGE_LOG(TRACE) << "backend capacity: " << commitData->info->name
                                                   << "-" << key << ", capacity: " << totalCapacity;
 #endif
-                        touchMRU(commitData->info->name, key, totalCapacity);
-                    }
+                                        touchMRU(commitData->info->name, key, totalCapacity);
+                                    }
 
-                    restoreCache(commitData->info, key, caches);
-                }
+                                    restoreCache(commitData->info, key, caches);
+                                }
 
-                caches->entries()->addEntry(cacheEntry);
-                caches->setNum(num);
-                caches->setEmpty(false);
-            }
+                                caches->entries()->addEntry(cacheEntry);
+                                caches->setNum(num);
+                                caches->setEmpty(false);
+                            }
 #if 0
-            STORAGE_LOG(TRACE) << "new cached: " << commitData->info->name << "-" << key
+            CACHED_STORAGE_LOG(TRACE) << "new cached: " << commitData->info->name << "-" << key
                                << ", capacity: " << cacheEntry->capacity();
 #endif
-            touchMRU(commitData->info->name, key, cacheEntry->capacity());
-        }
-    }
+                            touchMRU(commitData->info->name, key, cacheEntry->capacity());
+                        }
+                    });
+            }
+        });
+    // sort the caches
+    TIME_RECORD("sort caches");
+    sortCaches(commitDatas, processedKeys);
 
     if (m_backend)
     {
@@ -496,7 +521,7 @@ size_t CachedStorage::commit(int64_t num, const std::vector<TableData::Ptr>& dat
                 }
             });
 
-            STORAGE_LOG(INFO) << "Submited block task: " << num
+            CACHED_STORAGE_LOG(INFO) << "Submited block task: " << num
                               << ", current syncd block: " << m_syncNum;
 
             uint64_t waitCount = 0;
@@ -532,11 +557,36 @@ size_t CachedStorage::commit(int64_t num, const std::vector<TableData::Ptr>& dat
     }
     else
     {
-        STORAGE_LOG(INFO) << "No backend storage, skip commit...";
+        CACHED_STORAGE_LOG(INFO) << "No backend storage, skip commit...";
 
         setSyncNum(num);
     }
     return total;
+}
+
+void CachedStorage::sortCaches(std::shared_ptr<std::vector<TableData::Ptr>> _commitDatas,
+    std::shared_ptr<std::vector<tbb::concurrent_unordered_set<std::string>>> _processedKeys)
+{
+    auto commitDataSize = _commitDatas->size();
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, commitDataSize),
+        [&](const tbb::blocked_range<size_t>& range) {
+            for (size_t i = range.begin(); i < range.end(); i++)
+            {
+                auto commitData = (*_commitDatas)[i];
+                auto processedKey = (*_processedKeys)[i];
+                // get caches and parallel sort the caches
+                tbb::parallel_for(processedKey.range(),
+                    [&](tbb::concurrent_unordered_set<std::string>::range_type& range) {
+                        for (auto it = range.begin(); it != range.end(); ++it)
+                        {
+                            auto result = touchCache(commitData->info, *it, true);
+                            auto caches = std::get<1>(result);
+                            tbb::parallel_sort(caches->entries()->begin(), caches->entries()->end(),
+                                EntryLessNoLock(commitData->info));
+                        }
+                    });
+            }
+        });
 }
 
 void CachedStorage::setBackend(Storage::Ptr backend)
@@ -556,10 +606,10 @@ void CachedStorage::stop()
 {
     if (!m_running)
     {
-        STORAGE_LOG(INFO) << LOG_DESC("CachedStorage already stopped!");
+        CACHED_STORAGE_LOG(INFO) << LOG_DESC("already stopped!");
         return;
     }
-    STORAGE_LOG(INFO) << "Stopping flushStorage thread";
+    CACHED_STORAGE_LOG(INFO) << "Stopping flushStorage thread";
     m_running->store(false);
     m_taskThreadPool->stop();
 
@@ -575,7 +625,7 @@ void CachedStorage::stop()
             m_clearThread->detach();
         }
     }
-    STORAGE_LOG(INFO) << "flushStorage thread stopped.";
+    CACHED_STORAGE_LOG(INFO) << "flushStorage thread stopped.";
 }
 
 void CachedStorage::clear()
@@ -609,11 +659,13 @@ void CachedStorage::startClearThread()
 {
     std::weak_ptr<CachedStorage> self(std::dynamic_pointer_cast<CachedStorage>(shared_from_this()));
     auto running = m_running;
-    m_clearThread = std::make_shared<std::thread>([running, self]() {
+    auto groupID = m_groupID;
+    m_clearThread = std::make_shared<std::thread>([running, self, groupID]() {
+        dev::pthread_setThreadName("MemClear-" + to_string(groupID));
         while (true)
         {
             auto storage = self.lock();
-            if (storage && storage->m_running->load())
+            if (storage && running->load())
             {
                 std::this_thread::sleep_for(std::chrono::milliseconds(storage->m_clearInterval));
                 storage->checkAndClear();
@@ -632,8 +684,9 @@ void CachedStorage::touchMRU(const std::string& table, const std::string& key, s
     {
         return;
     }
-
-    m_mruQueue->push(std::make_tuple(table, key, capacity));
+    m_asyncThreadPool->enqueue([this, table, key, capacity]() {
+        m_mruQueue->push(std::make_tuple(table, key, capacity));
+    });
 }
 
 void CachedStorage::updateMRU(const std::string& table, const std::string& key, ssize_t capacity)
@@ -678,6 +731,18 @@ std::tuple<std::shared_ptr<Cache::RWScoped>, Cache::Ptr, bool> CachedStorage::to
         cache->setKey(key);
         cache->setTableInfo(tableInfo);
     }
+    else
+    {
+        RWMutexScoped lockCache(m_cachesMutex, false);
+
+        auto result = m_caches.insert(std::make_pair(cacheKey, cache));
+        if (!result.second && cache != result.first->second)
+        {
+            cache = result.first->second;
+            cacheLock.reset();
+            cacheLock = std::make_shared<Cache::RWScoped>(*(cache->mutex()), write);
+        }
+    }
 
     if (hit)
     {
@@ -711,7 +776,16 @@ void CachedStorage::restoreCache(TableInfo::Ptr table, const std::string& key, C
 void CachedStorage::removeCache(const std::string& table, const std::string& key)
 {
     auto cacheKey = table + "_" + key;
-    RWMutexScoped lockCache(m_cachesMutex, true);
+    RWMutexScoped lockCache;
+
+    while (true)
+    {
+        if (lockCache.try_acquire(m_cachesMutex, true))
+        {
+            break;
+        }
+        std::this_thread::yield();
+    }
 
     auto c = m_caches.unsafe_erase(cacheKey);
 
@@ -730,18 +804,18 @@ bool CachedStorage::disabled()
 
 bool CachedStorage::commitBackend(Task::Ptr task)
 {
-    auto now = std::chrono::system_clock::now();
+    auto now = std::chrono::steady_clock::now();
 
-    STORAGE_LOG(INFO) << "Start commit block: " << task->num << " to backend storage";
+    CACHED_STORAGE_LOG(INFO) << "Start commit block: " << task->num
+                      << " to backend storage";
     try
     {
         m_backend->commit(task->num, *(task->datas));
 
         setSyncNum(task->num);
 
-        std::chrono::duration<double> elapsed = std::chrono::system_clock::now() - now;
-        STORAGE_LOG(INFO)
-            << "[g:" << std::to_string(groupID()) << "]"
+        std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - now;
+        CACHED_STORAGE_LOG(INFO)
             << "\n---------------------------------------------------------------------\n"
             << "Commit block: " << task->num
             << " to backend storage finished, current cached block: " << m_commitNum << "\n"
@@ -755,12 +829,11 @@ bool CachedStorage::commitBackend(Task::Ptr task)
         }
     }
     catch (std::exception& e)
-    {
-        // stop() commit thread to exit
+    {  // stop() commit thread to exit
         m_running->store(false);
         m_taskThreadPool->stop();
         raise(SIGTERM);
-        STORAGE_LOG(ERROR) << "Stop commit thread. Fail to commit data: " << e.what();
+        CACHED_STORAGE_LOG(ERROR) << "Stop commit thread. Fail to commit data: " << e.what();
         return false;
     }
     return true;
@@ -769,7 +842,9 @@ bool CachedStorage::commitBackend(Task::Ptr task)
 void CachedStorage::checkAndClear()
 {
     uint64_t count = 0;
-    while (count < m_maxPopMRU)
+    // calculate and calculate m_capacity with all elements of m_mruQueue
+    // since inner loop will break once m_mruQueue is empty, here use while(true)
+    while (true)
     {
         std::tuple<std::string, std::string, ssize_t> mru;
         auto result = m_mruQueue->try_pop(mru);
@@ -795,7 +870,6 @@ void CachedStorage::checkAndClear()
     do
     {
         needClear = false;
-
         if (m_syncNum > 0)
         {
             if (m_capacity > m_maxCapacity && !m_mru->empty())
@@ -806,7 +880,7 @@ void CachedStorage::checkAndClear()
 
         if (needClear)
         {
-            for (auto it = m_mru->begin(); it != m_mru->end();)
+            for (auto it = m_mru->begin(); it != m_mru->end() && m_running->load();)
             {
                 if (m_capacity <= (int64_t)m_maxCapacity || m_mru->empty())
                 {
@@ -818,11 +892,16 @@ void CachedStorage::checkAndClear()
                 auto tableInfo = std::make_shared<TableInfo>();
                 tableInfo->name = it->first;
 
+                // The life cycle of the cache must be longer than the result, because the
+                // deconstruction order of the tuple is related to the gcc version and the compiler.
+                // It must be ensured that RWMutexScoped is deconstructed first, and the cache is
+                // deconstructed, otherwise the program will coredump
+                Cache::Ptr cache;
                 auto result = touchCache(tableInfo, it->second, true);
-                auto cache = std::get<1>(result);
+                cache = std::get<1>(result);
 
                 if (std::get<2>(result))
-                {
+                {  // FIXME: if always true, simplify this
                     if (m_syncNum > 0 && (cache->num() <= m_syncNum))
                     {
                         int64_t totalCapacity = 0;
@@ -850,7 +929,7 @@ void CachedStorage::checkAndClear()
             }
             ++clearTimes;
         }
-    } while (needClear);
+    } while (needClear && m_running->load());
 
     if (clearThrough > 0)
     {

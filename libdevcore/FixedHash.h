@@ -239,6 +239,9 @@ public:
     /// @returns the hash as a user-readable hex string.
     std::string hex() const { return toHex(ref()); }
 
+    /// @returns the hash as a user-readable hex string with 0x perfix.
+    std::string hexPrefixed() const { return toHexPrefixed(ref()); }
+
     /// @returns a mutable byte vector_ref to the object's data.
     bytesRef ref() { return bytesRef(m_data.data(), N); }
 
@@ -387,7 +390,7 @@ public:
     {}
     explicit SecureFixedHash(bytes const* _d, ConstructFromPointerType _t) : FixedHash<T>(_d, _t) {}
     ~SecureFixedHash() { ref().cleanse(); }
-
+    SecureFixedHash(SecureFixedHash<T> const& _c) = default;
     SecureFixedHash<T>& operator=(SecureFixedHash<T> const& _c)
     {
         if (&_c == this)
@@ -609,6 +612,9 @@ inline std::string toString(h256s const& _bs)
     out << "]";
     return out.str();
 }
+
+bool isNodeIDOk(dev::h512 const& _nodeID);
+bool isNodeIDOk(const std::string& _nodeID);
 
 }  // namespace dev
 

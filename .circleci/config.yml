@@ -48,17 +48,17 @@ jobs:
     executor: ubuntu-build-env
     steps:
       - install_depencies:
-          packages: "ccache lcov"
+          packages: "ccache lcov patch flex bison libgmp-dev"
       - checkout
       - restore_cache:
           keys:
-            - deps-cache-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ checksum ".circleci/config.yml" }}
-            - deps-cache-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-
-            - deps-cache-{{ .Environment.CIRCLE_JOB }}-
+            - deps-cache-v3-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ checksum ".circleci/config.yml" }}
+            - deps-cache-v3-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-
+            - deps-cache-v3-{{ .Environment.CIRCLE_JOB }}-
       - compile:
           options: "-DBUILD_STATIC=ON -DTESTS=ON -DCOVERAGE=ON -DCMAKE_BUILD_TYPE=Debug"
       - save_cache:
-          key: deps-cache-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ checksum ".circleci/config.yml" }}
+          key: deps-cache-v3-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ checksum ".circleci/config.yml" }}
           paths:
             - deps
             - /ccache
@@ -110,28 +110,31 @@ jobs:
   build_test_guomi:
     working_directory: /FISCO-BCOS-GM
     docker:
-        - image: centos:7
+      - image: centos:7
     steps:
       - run:
           name: Setup dependencies
           command: |
-            yum install -y epel-release
-            yum install -y git make gcc-c++ cmake3 openssl-devel openssl ccache
+            yum install -y epel-release centos-release-scl
+            yum install -y git make gcc-c++ cmake3 openssl-devel openssl ccache flex patch bison gmp-static devtoolset-7
             echo 'export CCACHE_DIR=/ccache' >> $BASH_ENV
+
       - checkout
       - restore_cache:
           keys:
-            - deps-cache-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ checksum ".circleci/config.yml" }}
-            - deps-cache-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-
-            - deps-cache-{{ .Environment.CIRCLE_JOB }}-
+            - deps-v2-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ checksum ".circleci/config.yml" }}
+            - deps-v2-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-
+            - deps-v2-{{ .Environment.CIRCLE_JOB }}-
       - run:
           name: Compile
           command: |
+            source /opt/rh/devtoolset-7/enable
+            yum list devtoolset-7\*
             mkdir -p build && cd build
-            cmake3 -DBUILD_GM=ON -DTESTS=ON -DTOOL=ON -DDEMO=ON ..
+            cmake3 -DTESTS=ON -DTOOL=ON -DDEMO=ON ..
             make -j2
       - save_cache:
-          key: deps-cache-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ checksum ".circleci/config.yml" }}
+          key: deps-v2-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ checksum ".circleci/config.yml" }}
           paths:
             - deps
             - /ccache
@@ -139,7 +142,7 @@ jobs:
           name: Unit test
           command: |
             cd build
-            ./bin/test-fisco-bcos -- --testpath=../test/data/ 
+            ./bin/test-fisco-bcos --random -- --testpath=../test/data/
       - run:
           name: Run GM nodes
           command: |
@@ -151,26 +154,27 @@ jobs:
     executor: ubuntu-build-env
     steps:
       - install_depencies:
-          packages: "ccache"
+          packages: "ccache libgmp-dev flex bison patch"
       - checkout
       - restore_cache:
           keys:
-            - deps-cache-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ checksum ".circleci/config.yml" }}
+            - deps-cache-v1-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ checksum ".circleci/config.yml" }}
       - compile:
           options: "-DBUILD_STATIC=ON"
           compiler: "CC=/usr/bin/clang CXX=/usr/bin/clang++"
       - save_cache:
-          key: deps-cache-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ checksum ".circleci/config.yml" }}
+          key: deps-cache-v1-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ checksum ".circleci/config.yml" }}
           paths:
             - deps
             - /ccache
       - run:
           name: Upload binary
           command: |
+            cp tools/build_chain.sh build/bin/
             cd build/bin
-            tar -zcf fisco-bcos.tar.gz fisco-bcos
+            tar -zcf fisco-bcos.tar.gz fisco-bcos build_chain.sh
             strip fisco-bcos
-            tar -zcf fisco-bcos-mini.tar.gz fisco-bcos
+            tar -zcf fisco-bcos-mini.tar.gz fisco-bcos build_chain.sh
       - store_artifacts:
           path: /FISCO-BCOS/build/bin/fisco-bcos.tar.gz
           destination: fisco-bcos.tar.gz
@@ -178,44 +182,12 @@ jobs:
           path: /FISCO-BCOS/build/bin/fisco-bcos-mini.tar.gz
           destination: fisco-bcos-mini.tar.gz
 
-  build_guomi:
-    working_directory: /FISCO-BCOS-GM
-    executor: ubuntu-build-env
-    steps:
-      - install_depencies:
-          packages: "ccache"
-      - checkout
-      - restore_cache:
-          keys:
-            - deps-cache-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ checksum ".circleci/config.yml" }}
-      - compile:
-          options: "-DBUILD_STATIC=ON -DBUILD_GM=ON"
-          compiler: "CC=/usr/bin/clang CXX=/usr/bin/clang++"
-      - save_cache:
-          key: deps-cache-{{ .Environment.CIRCLE_JOB }}-{{ .Branch }}-{{ checksum ".circleci/config.yml" }}
-          paths:
-            - deps
-            - /ccache
-      - run:
-          name: Upload binary
-          command: |
-            cd build/bin
-            tar -zcf fisco-bcos-gm.tar.gz fisco-bcos
-            strip fisco-bcos
-            tar -zcf fisco-bcos-mini-gm.tar.gz fisco-bcos
-      - store_artifacts:
-          path: /FISCO-BCOS-GM/build/bin/fisco-bcos-gm.tar.gz
-          destination: fisco-bcos-gm.tar.gz
-      - store_artifacts:
-          path: /FISCO-BCOS-GM/build/bin/fisco-bcos-mini-gm.tar.gz
-          destination: fisco-bcos-mini-gm.tar.gz
-
   deploy_static:
     working_directory: /FISCO-BCOS
     executor: ubuntu-build-env
     steps:
       - install_depencies:
-          packages: "ca-certificates golang-go"
+          packages: "ca-certificates golang-go libgmp-dev flex bison patch"
       - checkout
       - compile:
           options: "-DTOOL=ON -DBUILD_STATIC=ON -DCMAKE_BUILD_TYPE=Release"
@@ -238,28 +210,6 @@ jobs:
             ~/go/bin/ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -r ${CIRCLE_PROJECT_REPONAME} -replace ${CIRCLE_TAG} /FISCO-BCOS/build/bin/fisco-sync.tar.gz
             ~/go/bin/ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -r ${CIRCLE_PROJECT_REPONAME} -replace ${CIRCLE_TAG} /FISCO-BCOS/build/bin/fisco-bcos-withSymbols.tar.gz
 
-  deploy_guomi:
-    working_directory: /FISCO-BCOS-GM
-    executor: ubuntu-build-env
-    steps:
-      - install_depencies:
-          packages: "ca-certificates golang-go"
-      - checkout
-      - compile:
-          options: "-DBUILD_STATIC=ON -DBUILD_GM=ON -DCMAKE_BUILD_TYPE=Release"
-          compiler: "CC=/usr/bin/clang CXX=/usr/bin/clang++"
-      - run:
-          name: Strip
-          command: |
-            cd build/bin
-            strip fisco-bcos
-            tar -zcf fisco-bcos-gm.tar.gz fisco-bcos
-      - run:
-          name: Upload to GitHub Release
-          command: |
-            go get github.com/tcnksm/ghr
-            ~/go/bin/ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -r ${CIRCLE_PROJECT_REPONAME} -replace ${CIRCLE_TAG} /FISCO-BCOS-GM/build/bin/fisco-bcos-gm.tar.gz
-
 workflows:
   version: 2
   build_and_test:
@@ -267,7 +217,8 @@ workflows:
       - build_static_test:
           filters:
             branches:
-              only: /^pull.*/
+              only:
+                - /^pull.*/
             tags:
               ignore: /.*/
       - generate_coverage:
@@ -275,7 +226,8 @@ workflows:
             - build_static_test
           filters:
             branches:
-              only: /^pull.*/
+              only:
+                - /^pull.*/
             tags:
               ignore: /.*/
       - integration_test:
@@ -283,13 +235,16 @@ workflows:
             - build_static_test
           filters:
             branches:
-              only: /^pull.*/
+              only:
+                - /^pull.*/
             tags:
               ignore: /.*/
       - build_test_guomi:
           filters:
             branches:
-              only: /^pull.*/
+              only:
+                - /^pull.*/
+                - /^release.*/
             tags:
               ignore: /.*/
       - build_static:
@@ -298,22 +253,9 @@ workflows:
               ignore: /^pull.*/
             tags:
               ignore: /.*/
-      - build_guomi:
-          filters:
-            branches:
-              ignore: /^pull.*/
-            tags:
-              ignore: /.*/
   deploy:
     jobs:
       - deploy_static:
-          filters:
-            tags:
-              only:
-                - /v2.*/
-            branches:
-              ignore: /.*/
-      - deploy_guomi:
           filters:
             tags:
               only:

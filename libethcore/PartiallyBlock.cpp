@@ -59,7 +59,7 @@ void PartiallyBlock::calTxsHashBytes()
         [&](const tbb::blocked_range<size_t>& _r) {
             for (uint32_t i = _r.begin(); i < _r.end(); ++i)
             {
-                (*m_txsHash)[i] = (*m_transactions)[i]->sha3();
+                (*m_txsHash)[i] = (*m_transactions)[i]->hash();
             }
         });
 }
@@ -112,15 +112,21 @@ void PartiallyBlock::checkBasic(RLP const& rlp, dev::h256 const& _expectedHash)
     }
 }
 
+
 // fill the missed transactions into the block
 void PartiallyBlock::fillBlock(bytesConstRef _txsData)
 {
-    m_missedTransactions->clear();
     RLP blockRlp(_txsData);
-    // check block number
-    checkBasic(blockRlp, m_blockHeader.hash());
+    fillBlock(blockRlp);
+}
 
-    auto txsBytes = blockRlp[2].toBytesConstRef();
+void PartiallyBlock::fillBlock(RLP const& _rlp)
+{
+    m_missedTransactions->clear();
+    // check block number
+    checkBasic(_rlp, m_blockHeader.hash());
+
+    auto txsBytes = _rlp[2].toBytesConstRef();
     // decode transactions into m_missedTransactions
     TxsParallelParser::decode(m_missedTransactions, txsBytes, CheckTransaction::Everything, true);
 
@@ -138,12 +144,12 @@ void PartiallyBlock::fillBlock(bytesConstRef _txsData)
     int64_t index = 0;
     for (auto tx : *m_missedTransactions)
     {
-        if (tx->sha3() != (*m_missedTxs)[index].first)
+        if (tx->hash() != (*m_missedTxs)[index].first)
         {
             PartiallyBlock_LOG(WARNING)
                 << LOG_DESC("fillBlock failed for inconsistent transaction hash")
                 << LOG_KV("expectedHash", (*m_missedTxs)[index].first.abridged())
-                << LOG_KV("fetchedHash", tx->sha3().abridged());
+                << LOG_KV("fetchedHash", tx->hash().abridged());
             BOOST_THROW_EXCEPTION(
                 InvalidTransaction() << errinfo_comment(
                     "fillBlock: invalid fetched transaction for inconsistent transaction hash"));
@@ -175,14 +181,6 @@ void PartiallyBlock::encodeMissedInfo(std::shared_ptr<bytes> _encodedBytes)
 void PartiallyBlock::fetchMissedTxs(
     std::shared_ptr<bytes> _encodedBytes, bytesConstRef _missInfo, dev::h256 const& _expectedHash)
 {
-    if (m_missedTransactions->size() > 0)
-    {
-        PartiallyBlock_LOG(WARNING) << LOG_DESC(
-            "fetchMissedTxs failed for the block-self does not has complete transactions");
-        BOOST_THROW_EXCEPTION(
-            NotCompleteBlock() << errinfo_comment(
-                "fetchMissedTxs: the block-self does not has complete transactions"));
-    }
     // decode _missInfo
     RLP missedInfoRlp(_missInfo);
     // Note: since the blockHash maybe changed after the block executed,
@@ -208,12 +206,12 @@ void PartiallyBlock::encodeMissedTxs(std::shared_ptr<bytes> _encodedBytes,
     for (auto const& txsInfo : *_missedTxs)
     {
         auto tx = (*m_transactions)[txsInfo.second];
-        if (tx->sha3() != txsInfo.first)
+        if (tx->hash() != txsInfo.first)
         {
             PartiallyBlock_LOG(WARNING)
                 << LOG_DESC("fetchMissedTxs failed for inconsistent transaction hash")
                 << LOG_KV("requestHash", txsInfo.first.abridged())
-                << LOG_KV("txHash", tx->sha3().abridged());
+                << LOG_KV("txHash", tx->hash().abridged());
             BOOST_THROW_EXCEPTION(
                 InvalidTransaction() << errinfo_comment(
                     "encodeMissedTxs: invalid transaction for inconsistent transaction hash"));

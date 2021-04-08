@@ -192,8 +192,8 @@ void SyncMaster::workLoop()
         doWork();
         if (idleWaitMs())
         {
-            std::unique_lock<std::mutex> l(x_signalled);
-            m_signalled.wait_for(l, std::chrono::milliseconds(idleWaitMs()));
+            boost::unique_lock<boost::mutex> l(x_signalled);
+            m_signalled.wait_for(l, boost::chrono::milliseconds(idleWaitMs()));
         }
     }
 }
@@ -224,17 +224,17 @@ void SyncMaster::maintainBlocks()
         return;
     }
 
-    if (!m_newBlocks && utcTime() <= m_maintainBlocksTimeout)
+    if (!m_newBlocks && utcSteadyTime() <= m_maintainBlocksTimeout)
     {
         return;
     }
 
     m_newBlocks = false;
-    m_maintainBlocksTimeout = utcTime() + c_maintainBlocksTimeout;
+    m_maintainBlocksTimeout = utcSteadyTime() + c_maintainBlocksTimeout;
 
 
     int64_t number = m_blockChain->number();
-    h256 const& currentHash = m_blockChain->numberHash(number);
+    h256 currentHash = m_blockChain->numberHash(number);
 
     if (m_syncTreeRouter)
     {
@@ -251,7 +251,7 @@ void SyncMaster::maintainBlocks()
 
 void SyncMaster::sendSyncStatusByTree(BlockNumber const& _blockNumber, h256 const& _currentHash)
 {
-    auto selectedNodes = m_syncTreeRouter->selectNodes(m_syncStatus->peersSet());
+    auto selectedNodes = m_syncTreeRouter->selectNodesForBlockSync(m_syncStatus->peersSet());
     SYNC_LOG(DEBUG) << LOG_BADGE("sendSyncStatusByTree") << LOG_KV("blockNumber", _blockNumber)
                     << LOG_KV("currentHash", _currentHash.abridged())
                     << LOG_KV("selectedNodes", selectedNodes->size());
@@ -271,16 +271,18 @@ void SyncMaster::broadcastSyncStatus(BlockNumber const& _blockNumber, h256 const
 bool SyncMaster::sendSyncStatusByNodeId(
     BlockNumber const& blockNumber, h256 const& currentHash, dev::network::NodeID const& nodeId)
 {
-    SyncStatusPacket packet;
-    packet.encode(blockNumber, m_genesisHash, currentHash);
+    auto packet = m_syncMsgPacketFactory->createSyncStatusPacket(
+        m_nodeId, blockNumber, m_genesisHash, currentHash);
+    packet->alignedTime = utcTime();
+    packet->encode();
     m_service->asyncSendMessageByNodeID(
-        nodeId, packet.toMessage(m_protocolId), CallbackFuncWithSession(), Options());
-
+        nodeId, packet->toMessage(m_protocolId), CallbackFuncWithSession(), Options());
     SYNC_LOG(DEBUG) << LOG_BADGE("Status") << LOG_DESC("Send current status when maintainBlocks")
                     << LOG_KV("number", blockNumber)
                     << LOG_KV("genesisHash", m_genesisHash.abridged())
                     << LOG_KV("currentHash", currentHash.abridged())
-                    << LOG_KV("peer", nodeId.abridged());
+                    << LOG_KV("peer", nodeId.abridged())
+                    << LOG_KV("currentTime", packet->alignedTime);
     return true;
 }
 
@@ -289,14 +291,12 @@ void SyncMaster::maintainPeersStatus()
     uint64_t currentTime = utcTime();
     if (isSyncing())
     {
-        // Skip downloading if last if not timeout
-        if (((int64_t)currentTime - (int64_t)m_lastDownloadingRequestTime) <
+        auto maxTimeout = std::max((int64_t)c_respondDownloadRequestTimeout,
             (int64_t)m_eachBlockDownloadingRequestTimeout *
-                (m_maxRequestNumber - m_lastDownloadingBlockNumber))
+                (m_maxRequestNumber - m_lastDownloadingBlockNumber));
+        // Skip downloading if last if not timeout
+        if (((int64_t)currentTime - (int64_t)m_lastDownloadingRequestTime) < maxTimeout)
         {
-            SYNC_LOG(DEBUG) << LOG_BADGE("Download") << LOG_DESC("Waiting for peers' blocks")
-                            << LOG_KV("maxRequestNumber", m_maxRequestNumber)
-                            << LOG_KV("lastDownloadingBlockNumber", m_lastDownloadingBlockNumber);
             return;  // no need to sync
         }
         else
@@ -374,9 +374,16 @@ void SyncMaster::maintainPeersStatus()
         return;  // no need to send request block packet
     }
 
+    // adjust maxRequestBlocksSize before request blocks
+    m_syncStatus->bq().adjustMaxRequestBlocks();
     // Sharding by c_maxRequestBlocks to request blocks
+    auto requestBlocksSize = m_syncStatus->bq().maxRequestBlocks();
+    if (requestBlocksSize <= 0)
+    {
+        return;
+    }
     size_t shardNumber =
-        (maxRequestNumber - currentNumber + c_maxRequestBlocks - 1) / c_maxRequestBlocks;
+        (maxRequestNumber - currentNumber + requestBlocksSize - 1) / requestBlocksSize;
     size_t shard = 0;
 
     m_maxRequestNumber = 0;  // each request turn has new m_maxRequestNumber
@@ -392,8 +399,8 @@ void SyncMaster::maintainPeersStatus()
             }
 
             // shard: [from, to]
-            int64_t from = currentNumber + 1 + shard * c_maxRequestBlocks;
-            int64_t to = min(from + c_maxRequestBlocks - 1, maxRequestNumber);
+            int64_t from = currentNumber + 1 + shard * requestBlocksSize;
+            int64_t to = min(from + requestBlocksSize - 1, maxRequestNumber);
             if (_p->number < to)
                 return true;  // exit, to next peer
 
@@ -409,7 +416,7 @@ void SyncMaster::maintainPeersStatus()
             m_maxRequestNumber = max(m_maxRequestNumber, to);
 
             SYNC_LOG(INFO) << LOG_BADGE("Download") << LOG_BADGE("Request")
-                           << LOG_DESC("Request blocks") << LOG_KV("frm", from) << LOG_KV("to", to)
+                           << LOG_DESC("Request blocks") << LOG_KV("from", from) << LOG_KV("to", to)
                            << LOG_KV("peer", _p->nodeId.abridged());
 
             ++shard;  // shard move
@@ -419,8 +426,8 @@ void SyncMaster::maintainPeersStatus()
 
         if (!thisTurnFound)
         {
-            int64_t from = currentNumber + shard * c_maxRequestBlocks;
-            int64_t to = min(from + c_maxRequestBlocks - 1, maxRequestNumber);
+            int64_t from = currentNumber + shard * requestBlocksSize;
+            int64_t to = min(from + requestBlocksSize - 1, maxRequestNumber);
 
             SYNC_LOG(WARNING) << LOG_BADGE("Download") << LOG_BADGE("Request")
                               << LOG_DESC("Couldn't find any peers to request blocks")
@@ -536,7 +543,7 @@ bool SyncMaster::maintainDownloadingQueue()
     // has download finished ?
     if (currentNumber >= m_syncStatus->knownHighestNumber)
     {
-        h256 const& latestHash =
+        h256 latestHash =
             m_blockChain->getBlockByNumber(m_syncStatus->knownHighestNumber)->headerHash();
         SYNC_LOG(INFO) << LOG_BADGE("Download") << LOG_BADGE("BlockSync")
                        << LOG_DESC("Download finish") << LOG_KV("latestHash", latestHash.abridged())
@@ -601,28 +608,33 @@ void SyncMaster::maintainPeersConnection()
 
 
     // Add new peers
-    h256 const& currentHash = m_blockChain->numberHash(currentNumber);
+    h256 currentHash = m_blockChain->numberHash(currentNumber);
     for (auto const& member : memberSet)
     {
         if (member != m_nodeId && !m_syncStatus->hasPeer(member))
         {
             // create a peer
-            SyncPeerInfo newPeer{member, 0, m_genesisHash, m_genesisHash};
-            m_syncStatus->newSyncPeerStatus(newPeer);
+            auto newPeerStatus = m_syncMsgPacketFactory->createSyncStatusPacket(
+                member, 0, m_genesisHash, m_genesisHash);
+            m_syncStatus->newSyncPeerStatus(newPeerStatus);
 
             if (m_needSendStatus)
             {
                 // send my status to her
-                SyncStatusPacket packet;
-                packet.encode(currentNumber, m_genesisHash, currentHash);
+                auto packet = m_syncMsgPacketFactory->createSyncStatusPacket(
+                    m_nodeId, currentNumber, m_genesisHash, currentHash);
+                packet->alignedTime = utcTime();
+                packet->encode();
+
                 m_service->asyncSendMessageByNodeID(
-                    member, packet.toMessage(m_protocolId), CallbackFuncWithSession(), Options());
+                    member, packet->toMessage(m_protocolId), CallbackFuncWithSession(), Options());
                 SYNC_LOG(DEBUG) << LOG_BADGE("Status")
                                 << LOG_DESC("Send current status to new peer")
                                 << LOG_KV("number", int(currentNumber))
                                 << LOG_KV("genesisHash", m_genesisHash.abridged())
                                 << LOG_KV("currentHash", currentHash.abridged())
-                                << LOG_KV("peer", member.abridged());
+                                << LOG_KV("peer", member.abridged())
+                                << LOG_KV("currentTime", packet->alignedTime);
             }
         }
     }
@@ -642,6 +654,7 @@ void SyncMaster::maintainPeersConnection()
 
     // If myself is not in group, no need to maintain blocks(send sync status to peers)
     m_needSendStatus = m_isGroupMember || hasMyself;  // need to send if last time is in group
+    m_txQueue->setNeedImportToTxPool(m_needSendStatus);
     m_isGroupMember = hasMyself;
 }
 
@@ -658,7 +671,7 @@ void SyncMaster::maintainDownloadingQueueBuffer()
 
 void SyncMaster::maintainBlockRequest()
 {
-    uint64_t timeout = utcTime() + c_respondDownloadRequestTimeout;
+    uint64_t timeout = utcSteadyTime() + c_respondDownloadRequestTimeout;
     m_syncStatus->foreachPeerRandom([&](std::shared_ptr<SyncPeerStatus> _p) {
         DownloadRequestQueue& reqQueue = _p->reqQueue;
         if (reqQueue.empty())
@@ -667,16 +680,17 @@ void SyncMaster::maintainBlockRequest()
         // Just select one peer per maintain
         DownloadBlocksContainer blockContainer(m_service, m_protocolId, _p->nodeId);
 
-        while (!reqQueue.empty() && utcTime() <= timeout)
+        while (!reqQueue.empty() && utcSteadyTime() <= timeout)
         {
             DownloadRequest req = reqQueue.topAndPop();
             int64_t number = req.fromNumber;
             int64_t numberLimit = req.fromNumber + req.size;
             SYNC_LOG(DEBUG) << LOG_BADGE("Download Request: response blocks")
                             << LOG_KV("from", req.fromNumber) << LOG_KV("size", req.size)
-                            << LOG_KV("numberLimit", numberLimit);
+                            << LOG_KV("numberLimit", numberLimit)
+                            << LOG_KV("peer", _p->nodeId.abridged());
             // Send block at sequence
-            for (; number < numberLimit && utcTime() <= timeout; number++)
+            for (; number < numberLimit && utcSteadyTime() <= timeout; number++)
             {
                 auto start_get_block_time = utcTime();
                 shared_ptr<bytes> blockRLP = m_blockChain->getBlockRLPByNumber(number);
@@ -689,20 +703,29 @@ void SyncMaster::maintainBlockRequest()
                         << LOG_KV("nodeId", _p->nodeId.abridged());
                     break;
                 }
-
-                SYNC_LOG(DEBUG) << LOG_BADGE("Download") << LOG_BADGE("Request")
-                                << LOG_BADGE("BlockSync") << LOG_DESC("Batch blocks for sending")
-                                << LOG_KV("number", number) << LOG_KV("peer", _p->nodeId.abridged())
-                                << LOG_KV("timeCost", utcTime() - start_get_block_time);
-                blockContainer.batchAndSend(blockRLP);
-
-                // update the sended block information
-                if (m_statisticHandler)
+                auto requiredPermits = blockRLP->size() / g_BCOSConfig.c_compressRate;
+                if (m_nodeBandwidthLimiter && !m_nodeBandwidthLimiter->tryAcquire(requiredPermits))
                 {
-                    m_statisticHandler->updateSendedBlockInfo(blockRLP->size());
-                    // print the statistic information
-                    m_statisticHandler->printStatistics();
+                    SYNC_LOG(INFO)
+                        << LOG_BADGE("maintainBlockRequest")
+                        << LOG_DESC("stop responding block for over the channel bandwidth limit")
+                        << LOG_KV("peer", _p->nodeId.abridged());
+                    break;
                 }
+                // over the network-bandwidth-limiter
+                if (m_bandwidthLimiter && !m_bandwidthLimiter->tryAcquire(requiredPermits))
+                {
+                    SYNC_LOG(INFO) << LOG_BADGE("maintainBlockRequest")
+                                   << LOG_DESC("stop responding block for over the bandwidth limit")
+                                   << LOG_KV("peer", _p->nodeId.abridged());
+                    break;
+                }
+                SYNC_LOG(INFO) << LOG_BADGE("Download") << LOG_BADGE("Request")
+                               << LOG_BADGE("BlockSync") << LOG_DESC("Batch blocks for sending")
+                               << LOG_KV("blockSize", blockRLP->size()) << LOG_KV("number", number)
+                               << LOG_KV("peer", _p->nodeId.abridged())
+                               << LOG_KV("timeCost", utcTime() - start_get_block_time);
+                blockContainer.batchAndSend(blockRLP);
             }
 
             if (number < numberLimit)  // This respond not reach the end due to timeout

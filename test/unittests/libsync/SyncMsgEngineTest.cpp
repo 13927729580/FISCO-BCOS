@@ -22,6 +22,8 @@
  */
 
 #include <libdevcore/TopicInfo.h>
+#include <libflowlimit/RateLimiter.h>
+#include <libnetwork/Host.h>
 #include <libsync/DownloadingTxsQueue.h>
 #include <libsync/SyncMsgEngine.h>
 #include <libsync/SyncMsgPacket.h>
@@ -55,6 +57,7 @@ public:
         m_txsWorker = nullptr;
         m_txsSender = nullptr;
         m_txsReceiver = nullptr;
+        m_syncMsgPacketFactory = std::make_shared<SyncMsgPacketFactory>();
     }
 
     bool interpret(
@@ -112,7 +115,7 @@ public:
             h256(0xcdef)),
         fakeException()
     {
-        SyncPeerInfo newPeer{NodeID(), 0, h256(0x1024), h256(0x1024)};
+        auto newPeer = std::make_shared<SyncStatusPacket>(NodeID(), 0, h256(0x1024), h256(0x1024));
         fakeStatusPtr->newSyncPeerStatus(newPeer);
     }
     FakeSyncToolsSet fakeSyncToolsSet;
@@ -142,6 +145,8 @@ public:
     // not used
     NodeID id() const override { return NodeID(); };
 
+    std::shared_ptr<dev::network::Host> host() override { return nullptr; };
+
     std::shared_ptr<P2PMessage> sendMessageByNodeID(NodeID, std::shared_ptr<P2PMessage>) override
     {
         return nullptr;
@@ -155,7 +160,11 @@ public:
     void asyncSendMessageByTopic(std::string, std::shared_ptr<P2PMessage>, CallbackFuncWithSession,
         dev::network::Options) override{};
 
-    void asyncMulticastMessageByTopic(std::string, std::shared_ptr<P2PMessage>) override{};
+    bool asyncMulticastMessageByTopic(
+        std::string, std::shared_ptr<P2PMessage>, dev::flowlimit::RateLimiter::Ptr) override
+    {
+        return true;
+    };
 
     void asyncMulticastMessageByNodeIDList(NodeIDs, std::shared_ptr<P2PMessage>) override{};
 
@@ -200,8 +209,8 @@ BOOST_FIXTURE_TEST_SUITE(SyncMsgEngineTest, SyncMsgEngineFixture)
 
 BOOST_AUTO_TEST_CASE(SyncStatusPacketTest)
 {
-    auto statusPacket = SyncStatusPacket();
-    statusPacket.encode(0x1, h256(0xcdef), h256(0xcd));
+    auto statusPacket = SyncStatusPacket(dev::h512(), 0x1, h256(0xcdef), h256(0xcd));
+    statusPacket.encode();
     auto msgPtr = statusPacket.toMessage(0x01);
     auto fakeSessionPtr = fakeSyncToolsSet.createSession();
     fakeMsgEngine.messageHandler(fakeException, fakeSessionPtr, msgPtr);
@@ -223,11 +232,15 @@ BOOST_AUTO_TEST_CASE(SyncTransactionPacketTest)
     auto msgPtr = txPacket.toMessage(0x02);
     auto fakeSessionPtr = fakeSyncToolsSet.createSession();
     fakeMsgEngine.messageHandler(fakeException, fakeSessionPtr, msgPtr);
+    std::cout << "onPeerTransactions finished" << std::endl;
     auto txPoolPtr = fakeSyncToolsSet.getTxPoolPtr();
     fakeTxQueuePtr->pop2TxPool(txPoolPtr);
+    std::cout << "pop2TxPool finished" << std::endl;
     auto topTxs = txPoolPtr->topTransactions(1);
+    std::cout << "topTransactions finished" << std::endl;
     BOOST_CHECK(topTxs->size() == 1);
-    BOOST_CHECK_EQUAL((*topTxs)[0]->sha3(), txPtr->sha3());
+    BOOST_CHECK_EQUAL((*topTxs)[0]->hash(), txPtr->hash());
+    // TODO: this unit test may cause fatal error randomly
 }
 
 BOOST_AUTO_TEST_CASE(SyncBlocksPacketTest)
@@ -254,7 +267,8 @@ BOOST_AUTO_TEST_CASE(SyncReqBlockPacketTest)
     auto msgPtr = reqBlockPacket.toMessage(0x03);
     auto fakeSessionPtr = fakeSyncToolsSet.createSession();
 
-    fakeStatusPtr->newSyncPeerStatus({h512(0), 0, h256(), h256()});
+    fakeStatusPtr->newSyncPeerStatus(
+        std::make_shared<SyncStatusPacket>(h512(0), 0, h256(), h256()));
     fakeMsgEngine.messageHandler(fakeException, fakeSessionPtr, msgPtr);
 
     BOOST_CHECK(fakeStatusPtr->hasPeer(h512(0)));

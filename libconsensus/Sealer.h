@@ -170,9 +170,10 @@ protected:
     /// reset timestamp of block header
     void resetCurrentTime()
     {
-        uint64_t parentTime =
+        int64_t parentTime =
             m_blockChain->getBlockByNumber(m_blockChain->number())->header().timestamp();
-        m_sealing.block->header().setTimestamp(std::max(parentTime + 1, utcTime()));
+        m_sealing.block->header().setTimestamp(
+            std::max(parentTime + 1, m_consensusEngine->getAlignedTime()));
     }
 
 protected:
@@ -198,11 +199,11 @@ protected:
 
     /// atomic value represents that whether is calling syncTransactionQueue now
     /// signal to notify all thread to work
-    std::condition_variable m_signalled;
-    std::condition_variable m_blockSignalled;
+    boost::condition_variable m_signalled;
+    boost::condition_variable m_blockSignalled;
     /// mutex to access m_signalled
-    Mutex x_signalled;
-    Mutex x_blocksignalled;
+    boost::mutex x_signalled;
+    boost::mutex x_blocksignalled;
     std::atomic<bool> m_syncTxPool = {false};
     /// a new block has been submitted to the blockchain
     std::atomic<bool> m_syncBlock = {false};

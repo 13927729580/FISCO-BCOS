@@ -10,8 +10,9 @@ output_dir="newNode"
 logfile="build.log"
 conf_path="conf"
 gm_conf_path="gmconf/"
-TASSL_CMD="${HOME}"/.tassl
+TASSL_CMD="${HOME}"/.fisco/tassl
 guomi_mode=
+sdk_cert=
 
 LOG_WARN()
 {
@@ -26,42 +27,51 @@ LOG_INFO()
 }
 
 help() {
-    echo $1
     cat << EOF
 Usage:
-    -c <cert path>              [Required] cert key path 
-    -g <gm cert path>           gmcert key path, if generate gm node cert 
+    -c <cert path>              [Required] cert key path
+    -g <gm cert path>           gmcert key path, if generate gm node cert
+    -s                          If set -s, generate certificate for sdk
     -o <Output Dir>             Default ${output_dir}
     -h Help
-e.g 
-    $0 -c nodes/cert/agency -o newNode
-    $0 -c nodes/cert/agency -g nodes/gmcert/agency -o newNode_GM
+e.g
+    $0 -c nodes/cert/agency -o newNode                                #generate node certificate
+    $0 -c nodes/cert/agency -o newSDK -s                              #generate sdk certificate
+    $0 -c nodes/cert/agency -g nodes/gmcert/agency -o newNode_GM      #generate gm node certificate
+    $0 -c nodes/cert/agency -g nodes/gmcert/agency -o newSDK_GM -s    #generate gm sdk certificate
 EOF
 
 exit 0
 }
 
-# TASSL env
-check_and_install_tassl()
-{
-    if [ ! -f "${HOME}/.tassl" ];then
-        curl -LO https://github.com/FISCO-BCOS/LargeFiles/raw/master/tools/tassl.tar.gz
+check_and_install_tassl(){
+    if [ ! -f "${TASSL_CMD}" ];then
         LOG_INFO "Downloading tassl binary ..."
-        tar zxvf tassl.tar.gz
+        if [[ "$(uname)" == "Darwin" ]];then
+            curl -#LO https://github.com/FISCO-BCOS/LargeFiles/raw/master/tools/tassl_mac.tar.gz
+            mv tassl_mac.tar.gz tassl.tar.gz
+        else
+            curl -#LO https://github.com/FISCO-BCOS/LargeFiles/raw/master/tools/tassl.tar.gz
+        fi
+        tar zxvf tassl.tar.gz && rm tassl.tar.gz
         chmod u+x tassl
-        mv tassl ${HOME}/.tassl
+        mkdir -p "${HOME}"/.fisco
+        mv tassl "${HOME}"/.fisco/tassl
     fi
 }
 
 parse_params()
 {
-while getopts "c:o:g:h" option;do
+while getopts "c:o:g:hs" option;do
     case $option in
     c) [ ! -z $OPTARG ] && key_path=$OPTARG
     ;;
     o) [ ! -z $OPTARG ] && output_dir=$OPTARG
     ;;
-    g) guomi_mode="yes" && gmkey_path=$OPTARG;;
+    g) guomi_mode="yes" && gmkey_path=$OPTARG
+        check_and_install_tassl
+    ;;
+    s) sdk_cert="true";;
     h) help;;
     esac
 done
@@ -98,24 +108,32 @@ check_name() {
     }
 }
 
+exit_with_clean()
+{
+    local content=${1}
+    echo -e "\033[31m[ERROR] ${content}\033[0m"
+    if [ -d "${output_dir}" ];then
+        rm -rf "${output_dir}"
+    fi
+    exit 1
+}
+
 file_must_exists() {
     if [ ! -f "$1" ]; then
-        echo "$1 file does not exist, please check!"
-        exit $EXIT_CODE
+        exit_with_clean "$1 file does not exist, please check!"
     fi
 }
 
 dir_must_exists() {
     if [ ! -d "$1" ]; then
-        echo "$1 DIR does not exist, please check!"
-        exit $EXIT_CODE
+        exit_with_clean "$1 DIR does not exist, please check!"
     fi
 }
 
 dir_must_not_exists() {
     if [ -e "$1" ]; then
-        echo "$1 DIR exists, please clean old DIR!"
-        exit $EXIT_CODE
+        LOG_WARN "$1 DIR exists, please clean old DIR!"
+        exit 1
     fi
 }
 
@@ -125,12 +143,12 @@ gen_cert_secp256k1() {
     name="$3"
     type="$4"
     openssl ecparam -out $certpath/${type}.param -name secp256k1
-    openssl genpkey -paramfile $certpath/${type}.param -out $certpath/${type}.key
-    openssl pkey -in $certpath/${type}.key -pubout -out $certpath/${type}.pubkey
-    openssl req -new -sha256 -subj "/CN=${name}/O=fisco-bcos/OU=${type}" -key $certpath/${type}.key -config $capath/cert.cnf -out $certpath/${type}.csr
-    openssl x509 -req -days 3650 -sha256 -in $certpath/${type}.csr -CAkey $capath/agency.key -CA $capath/agency.crt\
-        -force_pubkey $certpath/${type}.pubkey -out $certpath/${type}.crt -CAcreateserial -extensions v3_req -extfile $capath/cert.cnf
-    openssl ec -in $certpath/${type}.key -outform DER | tail -c +8 | head -c 32 | xxd -p -c 32 | cat >$certpath/${type}.private
+    openssl genpkey -paramfile "$certpath/${type}.param" -out "$certpath/${type}.key" 2> /dev/null
+    openssl pkey -in "$certpath/${type}.key" -pubout -out "$certpath/${type}.pubkey" 2> /dev/null
+    openssl req -new -sha256 -subj "/CN=${name}/O=fisco-bcos/OU=${type}" -key "$certpath/${type}.key" -out "$certpath/${type}.csr"
+    openssl x509 -req -days 3650 -sha256 -in "$certpath/${type}.csr" -CAkey "$capath/agency.key" -CA "$capath/agency.crt" \
+        -force_pubkey "$certpath/${type}.pubkey" -out "$certpath/${type}.crt" -CAcreateserial -extensions v3_req -extfile "$capath/cert.cnf" 2> /dev/null
+    openssl ec -in "$certpath/${type}.key" -outform DER 2> /dev/null | tail -c +8 | head -c 32 | xxd -p -c 32 | cat >"$certpath/${type}.private"
     rm -f $certpath/${type}.csr
 }
 
@@ -139,19 +157,20 @@ gen_node_cert() {
         echo "openssl don't support secp256k1, please upgrade openssl!"
         exit -1
     fi
-    agpath="$2"
-    agency=$(getname "$agpath")
-    ndpath="$3"
-    node=$(getname "$ndpath")
+    agpath="${1}"
+    agency=$(basename "$agpath")
+    ndpath="${2}"
+    node="node"
     dir_must_exists "$agpath"
     file_must_exists "$agpath/agency.key"
     check_name agency "$agency"
-    dir_must_not_exists "$ndpath"	
+    dir_must_not_exists "$ndpath"
     check_name node "$node"
+
     mkdir -p $ndpath
-    gen_cert_secp256k1 "$agpath" "$ndpath" "$node" node
+    gen_cert_secp256k1 "$agpath" "$ndpath" "$node" "node"
     #nodeid is pubkey
-    openssl ec -in $ndpath/node.key -text -noout | sed -n '7,11p' | tr -d ": \n" | awk '{print substr($0,3);}' | cat >$ndpath/node.nodeid
+    openssl ec -text -noout -in "$ndpath/node.key" 2> /dev/null| sed -n '7,11p' | tr -d ": \n" | awk '{print substr($0,3);}' | cat >"$ndpath/node.nodeid"
     cp $agpath/ca.crt $agpath/agency.crt $ndpath
 }
 
@@ -163,7 +182,7 @@ gen_node_cert_with_extensions_gm() {
     extensions="$5"
 
     $TASSL_CMD genpkey -paramfile $capath/gmsm2.param -out $certpath/gm${type}.key
-    $TASSL_CMD req -new -subj "/CN=$name/O=fiscobcos/OU=agency" -key $certpath/gm${type}.key -config $capath/gmcert.cnf -out $certpath/gm${type}.csr
+    $TASSL_CMD req -new -subj "/CN=$name/O=fiscobcos/OU=agency" -config "$capath/gmcert.cnf" -key "$certpath/gm${type}.key" -out "$certpath/gm${type}.csr"
     $TASSL_CMD x509 -req -CA $capath/gmagency.crt -CAkey $capath/gmagency.key -days 3650 -CAcreateserial -in $certpath/gm${type}.csr -out $certpath/gm${type}.crt -extfile $capath/gmcert.cnf -extensions $extensions
 
     rm -f $certpath/gm${type}.csr
@@ -188,13 +207,6 @@ gen_node_cert_gm() {
     gen_node_cert_with_extensions_gm "$agpath" "$ndpath" "$node" ennode v3enc_req
     #nodeid is pubkey
     $TASSL_CMD ec -in $ndpath/gmnode.key -text -noout | sed -n '7,11p' | sed 's/://g' | tr "\n" " " | sed 's/ //g' | awk '{print substr($0,3);}'  | cat > $ndpath/gmnode.nodeid
-
-    #serial
-    if [ "" != "$($TASSL_CMD version | grep 1.0.2)" ];then
-        $TASSL_CMD x509  -text -in $ndpath/gmnode.crt | sed -n '5p' |  sed 's/://g' | tr "\n" " " | sed 's/ //g' | sed 's/[a-z]/\u&/g' | cat > $ndpath/gmnode.serial
-    else
-        $TASSL_CMD x509  -text -in $ndpath/gmnode.crt | sed -n '4p' |  sed 's/ //g' | sed 's/.*(0x//g' | sed 's/)//g' |sed 's/[a-z]/\u&/g' | cat > $ndpath/gmnode.serial
-    fi
 
     cp $agpath/gmca.crt $agpath/gmagency.crt $ndpath
     cd $ndpath
@@ -223,7 +235,7 @@ node_pid=\`ps aux|grep "\${fisco_bcos}"|grep -v grep|awk '{print \$2}'\`
 if [ ! -z \${node_pid} ];then
     echo " \${node} is running, pid is \$node_pid."
     exit 0
-else 
+else
     nohup \${fisco_bcos} -c config.ini 2>>nohup.out &
     sleep 0.5
 fi
@@ -260,18 +272,16 @@ done
 EOF
 }
 
-main()
-{    
+main(){
     if [ ! -z "$(openssl version | grep reSSL)" ];then
         export PATH="/usr/local/opt/openssl/bin:$PATH"
     fi
 
     while :
     do
-        gen_node_cert "" ${key_path} ${output_dir} > ${logfile} 2>&1
+        gen_node_cert "${key_path}" "${output_dir}"
         cd ${output_dir}
         mkdir -p ${conf_path}/
-        rm node.param node.pubkey
         mv *.* ${conf_path}/
         cd ${current_dir}
         #private key should not start with 00
@@ -305,13 +315,35 @@ main()
         cat ${gmkey_path}/gmagency.crt >> ${output_dir}/${gm_conf_path}/gmnode.crt
 
         #move origin conf to gm conf
-        rm ${output_dir}/${conf_path}/node.nodeid
-        cp ${output_dir}/${conf_path} ${output_dir}/${gm_conf_path}/origin_cert -r
+        # rm ${output_dir}/${conf_path}/node.nodeid
+        cp -r ${output_dir}/${conf_path} ${output_dir}/${gm_conf_path}/origin_cert
         #remove original cert files
-        rm ${output_dir:?}/${conf_path} -rf
+        rm -rf ${output_dir:?}/${conf_path}
         mv ${output_dir}/${gm_conf_path} ${output_dir}/${conf_path}
     fi
-    rm ${logfile}
+    if [[ -n "${sdk_cert}" ]]; then
+        if [ -n "$guomi_mode" ]; then
+            mv "${output_dir}/${conf_path}/gmnode.key" "${output_dir}/${conf_path}/gmsdk.key"
+            mv "${output_dir}/${conf_path}/gmnode.crt" "${output_dir}/${conf_path}/gmsdk.crt"
+            mv "${output_dir}/${conf_path}/gmennode.key" "${output_dir}/${conf_path}/gmensdk.key"
+            mv "${output_dir}/${conf_path}/gmennode.crt" "${output_dir}/${conf_path}/gmensdk.crt"
+            mv "${output_dir}/${conf_path}/gmnode.nodeid" "${output_dir}/${conf_path}/gmsdk.publickey"
+            mv "${output_dir}/${conf_path}/origin_cert/node.key" "${output_dir}/sdk.key"
+            mv "${output_dir}/${conf_path}/origin_cert/node.crt" "${output_dir}/sdk.crt"
+            mv "${output_dir}/${conf_path}/origin_cert/ca.crt" "${output_dir}/ca.crt"
+            mv "${output_dir}/${conf_path}/origin_cert/node.nodeid" "${output_dir}/sdk.publickey"
+            rm -rf "${output_dir:?}/${conf_path}/origin_cert"
+            mv "${output_dir}/${conf_path}" "${output_dir}/gm"
+        else
+            mv "${output_dir}/${conf_path}/node.key" "${output_dir}/sdk.key"
+            mv "${output_dir}/${conf_path}/node.nodeid" "${output_dir}/sdk.publickey"
+            mv "${output_dir}/${conf_path}/node.crt" "${output_dir}/sdk.crt"
+            mv "${output_dir}/${conf_path}/ca.crt" "${output_dir}/ca.crt"
+            rm -rf "${output_dir:?}/${conf_path}"
+        fi
+    fi
+    if [ -f "${logfile}" ];then rm "${logfile}";fi
+
 }
 
 parse_params $@

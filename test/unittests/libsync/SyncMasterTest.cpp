@@ -56,7 +56,9 @@ public:
       : SyncMaster(_service, _txPool, _blockChain, _blockVerifier, _protocolId, _nodeId,
             _genesisHash, _idleWaitMs, _gossipInterval, _gossipPeers, _enableSendTxsByTree,
             _enableSendBlockStatusByTree)
-    {}
+    {
+        m_syncMsgPacketFactory = std::make_shared<SyncMsgPacketFactory>();
+    }
 
     /// start blockSync
     void start() override
@@ -129,7 +131,8 @@ public:
             tx->setNonce(tx->nonce() + utcTime() + m_nonceBase);
             tx->setBlockLimit(u256(_currentBlockNumber) + c_maxBlockLimit);
             tx->setRpcTx(true);
-            SignatureStruct sig = dev::sign(sigKeyPair.secret(), tx->sha3(WithoutSignature));
+            std::shared_ptr<crypto::Signature> sig =
+                dev::crypto::Sign(sigKeyPair.secret(), tx->hash(WithoutSignature));
             /// update the signature of transaction
             tx->updateSignature(sig);
             // std::pair<h256, Address> ret = txPool->submit(tx);
@@ -151,9 +154,9 @@ BOOST_AUTO_TEST_CASE(syncInfoFormatTest)
 {
     std::shared_ptr<SyncMaster> sync = fakeSyncToolsSet(5, 5, NodeID(100)).sync;
     sync->syncStatus()->newSyncPeerStatus(
-        SyncPeerInfo{NodeID(101), 0, m_genesisHash, m_genesisHash});
+        std::make_shared<SyncStatusPacket>(NodeID(101), 0, m_genesisHash, m_genesisHash));
     sync->syncStatus()->newSyncPeerStatus(
-        SyncPeerInfo{NodeID(102), 0, m_genesisHash, m_genesisHash});
+        std::make_shared<SyncStatusPacket>(NodeID(102), 0, m_genesisHash, m_genesisHash));
 
     std::string info = sync->syncInfo();
 
@@ -179,11 +182,12 @@ BOOST_AUTO_TEST_CASE(MaintainTransactionsTest)
     std::shared_ptr<TxPoolInterface> txPool = syncTools.txPool;
 
     sync->syncStatus()->newSyncPeerStatus(
-        SyncPeerInfo{NodeID(101), 0, m_genesisHash, m_genesisHash});
+        std::make_shared<SyncStatusPacket>(NodeID(101), 0, m_genesisHash, m_genesisHash));
     sync->syncStatus()->newSyncPeerStatus(
-        SyncPeerInfo{NodeID(102), 0, m_genesisHash, m_genesisHash});
+        std::make_shared<SyncStatusPacket>(NodeID(102), 0, m_genesisHash, m_genesisHash));
 
-    shared_ptr<Transactions> txs = fakeTransactions(2, currentBlockNumber);
+    std::shared_ptr<FakeBlock> fakedBlock = std::make_shared<FakeBlock>();
+    shared_ptr<Transactions> txs = fakedBlock->fakeTransactions(2, currentBlockNumber);
     for (auto& tx : *txs)
         txPool->submitTransactions(tx);
 
@@ -201,7 +205,7 @@ BOOST_AUTO_TEST_CASE(MaintainTransactionsTest)
         return true;
     });
 
-    txs = fakeTransactions(2, currentBlockNumber);
+    txs = fakedBlock->fakeTransactions(2, currentBlockNumber);
     for (auto& tx : *txs)
         txPool->submitTransactions(tx);
 
@@ -215,7 +219,7 @@ BOOST_AUTO_TEST_CASE(MaintainTransactionsTest)
     // Message::Ptr msg = service->getAsyncSendMessageByNodeID(NodeID(101));
 
     // test transaction has send logic
-    txs = fakeTransactions(2, currentBlockNumber);
+    txs = fakedBlock->fakeTransactions(2, currentBlockNumber);
     for (auto& tx : *txs)
         txPool->submitTransactions(tx);
     sync->maintainTransactions();
@@ -226,11 +230,11 @@ BOOST_AUTO_TEST_CASE(MaintainTransactionsTest)
     BOOST_CHECK_EQUAL(service->getAsyncSendSizeByNodeID(NodeID(102)), 2);
 
     // test transaction known by peer logic
-    txs = fakeTransactions(1, currentBlockNumber);
+    txs = fakedBlock->fakeTransactions(1, currentBlockNumber);
     for (auto tx : *txs)
     {
         txPool->submitTransactions(tx);
-        txPool->setTransactionIsKnownBy(tx->sha3(), NodeID(101));
+        tx->appendNodeContainsTransaction(NodeID(101));
     }
     sync->maintainTransactions();
     cout << "Msg number: " << service->getAsyncSendSizeByNodeID(NodeID(101)) << endl;
@@ -238,7 +242,7 @@ BOOST_AUTO_TEST_CASE(MaintainTransactionsTest)
 
     BOOST_CHECK_EQUAL(service->getAsyncSendSizeByNodeID(NodeID(101)), 2);
     // the transaction won't be sent to other nodes if received from P2P
-    BOOST_CHECK_EQUAL(service->getAsyncSendSizeByNodeID(NodeID(102)), 3);
+    BOOST_CHECK_EQUAL(service->getAsyncSendSizeByNodeID(NodeID(102)), 2);
 
     // test transaction already sent
     sync->maintainTransactions();
@@ -246,7 +250,7 @@ BOOST_AUTO_TEST_CASE(MaintainTransactionsTest)
     cout << "Msg number: " << service->getAsyncSendSizeByNodeID(NodeID(102)) << endl;
 
     BOOST_CHECK_EQUAL(service->getAsyncSendSizeByNodeID(NodeID(101)), 2);
-    BOOST_CHECK_EQUAL(service->getAsyncSendSizeByNodeID(NodeID(102)), 3);
+    BOOST_CHECK_EQUAL(service->getAsyncSendSizeByNodeID(NodeID(102)), 2);
 }
 
 BOOST_AUTO_TEST_CASE(MaintainBlocksTest)
@@ -257,9 +261,9 @@ BOOST_AUTO_TEST_CASE(MaintainBlocksTest)
     std::shared_ptr<FakeService> service = syncTools.service;
 
     sync->syncStatus()->newSyncPeerStatus(
-        SyncPeerInfo{NodeID(101), 0, m_genesisHash, m_genesisHash});
+        std::make_shared<SyncStatusPacket>(NodeID(101), 0, m_genesisHash, m_genesisHash));
     sync->syncStatus()->newSyncPeerStatus(
-        SyncPeerInfo{NodeID(102), 0, m_genesisHash, m_genesisHash});
+        std::make_shared<SyncStatusPacket>(NodeID(102), 0, m_genesisHash, m_genesisHash));
 
     sync->maintainBlocks();
     cout << "Msg number: " << service->getAsyncSendSizeByNodeID(NodeID(101)) << endl;
@@ -275,14 +279,14 @@ BOOST_AUTO_TEST_CASE(MaintainPeersStatusTest)
     std::shared_ptr<FakeService> service = syncTools.service;
 
     // Can recieve 5 req
-    sync->syncStatus()->newSyncPeerStatus(SyncPeerInfo{
-        NodeID(101), c_maxRequestBlocks * 5 + currentBlockNumber, m_genesisHash, m_genesisHash});
+    sync->syncStatus()->newSyncPeerStatus(std::make_shared<SyncStatusPacket>(
+        NodeID(101), c_maxRequestBlocks * 5 + currentBlockNumber, m_genesisHash, m_genesisHash));
     // Can recieve 1 req
-    sync->syncStatus()->newSyncPeerStatus(SyncPeerInfo{
-        NodeID(102), c_maxRequestBlocks + currentBlockNumber, m_genesisHash, m_genesisHash});
+    sync->syncStatus()->newSyncPeerStatus(std::make_shared<SyncStatusPacket>(
+        NodeID(102), c_maxRequestBlocks + currentBlockNumber, m_genesisHash, m_genesisHash));
     // Can recieve 10(at least 5)req
-    sync->syncStatus()->newSyncPeerStatus(SyncPeerInfo{
-        NodeID(103), c_maxRequestBlocks * 10 + currentBlockNumber, m_genesisHash, m_genesisHash});
+    sync->syncStatus()->newSyncPeerStatus(std::make_shared<SyncStatusPacket>(
+        NodeID(103), c_maxRequestBlocks * 10 + currentBlockNumber, m_genesisHash, m_genesisHash));
 
     sync->maintainPeersStatus();
     cout << "Msg number: " << service->getAsyncSendSizeByNodeID(NodeID(103)) << endl;
@@ -415,9 +419,9 @@ BOOST_AUTO_TEST_CASE(maintainBlockRequestTest)
     std::shared_ptr<FakeService> service = syncTools.service;
 
     sync->syncStatus()->newSyncPeerStatus(
-        SyncPeerInfo{NodeID(101), 0, m_genesisHash, m_genesisHash});
+        std::make_shared<SyncStatusPacket>(NodeID(101), 0, m_genesisHash, m_genesisHash));
     sync->syncStatus()->newSyncPeerStatus(
-        SyncPeerInfo{NodeID(102), 0, m_genesisHash, m_genesisHash});
+        std::make_shared<SyncStatusPacket>(NodeID(102), 0, m_genesisHash, m_genesisHash));
 
     maintainAllBlockRequest(sync);
     // No request, msg is 0

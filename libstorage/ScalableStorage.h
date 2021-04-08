@@ -55,13 +55,18 @@ public:
     int64_t setRemoteBlockNumber(int64_t _blockNumber);
     int64_t getRemoteBlockNumber() { return m_remoteBlockNumber.load(); }
     void stop() override;
-    std::string getDBNameOfArchivedBlock(int64_t _blockNumber);
+    std::string getDBNameOfArchivedBlock(int64_t _blockNumber)
+    {
+        return getDBNameOfArchivedBlock(_blockNumber, true);
+    }
 
     bool isStateData(const std::string& _tableName);
 
 private:
+    std::string getDBNameOfArchivedBlock(int64_t _blockNumber, bool _noException);
     Entries::Ptr selectFromArchive(int64_t num, TableInfo::Ptr tableInfo, const std::string& key,
         Condition::Ptr condition = nullptr);
+    void conversionData(const std::string& tableName, Entries::Ptr entries);
     void separateData(const std::vector<TableData::Ptr>& datas,
         std::vector<TableData::Ptr>& stateData, std::vector<TableData::Ptr>& archiveData);
     TableData::Ptr getNumberToDBNameData(int64_t _blockNumber);

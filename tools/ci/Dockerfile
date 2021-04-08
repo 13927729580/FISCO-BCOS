@@ -1,28 +1,36 @@
-FROM ubuntu:16.04
-
+FROM ubuntu:18.04 as builder
 LABEL maintainer service@fisco.com.cn
 
 WORKDIR /
 
+ARG SOURCE_BRANCH
+ENV DEBIAN_FRONTEND=noninteractive \
+    SOURCE=${SOURCE_BRANCH:-master}
+
 RUN apt-get -q update && apt-get install -qy --no-install-recommends \
-    git clang make build-essential cmake libssl-dev \
-    ca-certificates tzdata \
+    git clang make build-essential cmake libssl-dev zlib1g-dev ca-certificates \
+    libgmp-dev flex bison patch \
     && ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
-    && dpkg-reconfigure -f noninteractive tzdata \
-    && git clone https://github.com/FISCO-BCOS/FISCO-BCOS.git \
-    && cd FISCO-BCOS && git checkout master \
-    && mkdir build && cd build \ 
-    && cmake .. \
-    && make \
-    && make install \
-    && cd / && rm -rf FISCO-BCOS \
-    && apt-get purge git cmake build-essential -y \ 
-    && apt-get autoremove -y \
-    && apt-get clean \
-    && rm  -rf /tmp/* \
+    && apt-get install -qy --no-install-recommends tzdata \
+    && dpkg-reconfigure --frontend noninteractive tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/FISCO-BCOS/FISCO-BCOS.git && cd FISCO-BCOS \
+    && git checkout ${SOURCE} && cmake . && make -j2 && strip bin/fisco-bcos
+
+FROM ubuntu:18.04
+LABEL maintainer service@fisco.com.cn
+
+RUN apt-get -q update && apt-get install -qy --no-install-recommends libssl-dev zlib1g-dev \
+    && ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && apt-get install -qy --no-install-recommends tzdata \
+    && dpkg-reconfigure --frontend noninteractive tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /FISCO-BCOS/bin/fisco-bcos /usr/local/bin/
 
 EXPOSE 30300 20200 8545
 
 ENTRYPOINT ["/usr/local/bin/fisco-bcos"]
 CMD ["--version"]
+

@@ -19,37 +19,27 @@
 # (c) 2016-2018 fisco-dev contributors.
 #------------------------------------------------------------------------------
 
-cmake_minimum_required(VERSION 3.4)
+cmake_minimum_required(VERSION 3.10)
 set(FISCO_BCOS_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}/cmake" CACHE PATH "The path to the cmake directory")
 list(APPEND CMAKE_MODULE_PATH ${FISCO_BCOS_CMAKE_DIR})
+set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum OS X deployment version")
 
-project(FISCO-BCOS VERSION "2.2.0")
+project(FISCO-BCOS VERSION "2.7.2")
 # Suffix like "-rc1" e.t.c. to append to versions wherever needed.
 set(VERSION_SUFFIX "")
 
 find_package(Git QUIET)
-if(GIT_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git")
-    option(GIT_SUBMODULE "Check submodules during build" ON)
-    if(GIT_SUBMODULE)
-        execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
-                        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-                        RESULT_VARIABLE GIT_SUBMOD_RESULT)
-        if(NOT GIT_SUBMOD_RESULT EQUAL "0")
-            message(FATAL_ERROR "git submodule update --init failed with ${GIT_SUBMOD_RESULT}, please checkout submodules")
-        endif()
-    endif()
+if(NOT GIT_FOUND)
+  message(FATAL_ERROR "Please install git")
 endif()
 
-if(NOT EXISTS "${CMAKE_SOURCE_DIR}/evmc/.git")
-    message(FATAL_ERROR "The submodules were not downloaded! GIT_SUBMODULE was turned off or failed. Please execute:\n  git submodule update --init")
-endif()
-
-set(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY On)
+set(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY ON)
 
 # basic setting
-include(EthOptions)
-include(EthCompilerSettings)
-include(EthDependencies)
+include(Options)
+configure_project()
+include(CompilerSettings)
+include(Dependencies)
 
 # install dependencies
 include(ProjectTBB)
@@ -65,17 +55,22 @@ include(ProjectTASSL)
 include(ProjectBoost)
 include(ProjectLibzdb)
 include(ProjectTCMalloc)
+include(ProjectLibFF)
+include(ProjectPaillier)
+include(ProjectGroupSig)
+include(ProjectEVMC)
+include(ProjectVRF)
+include(ProjectEVMONE)
 
-include_directories("${CMAKE_SOURCE_DIR}" "evmc/include")
+include_directories("${CMAKE_SOURCE_DIR}")
 
-configure_project(TESTS)
 add_subdirectory(libchannelserver)
 add_subdirectory(libdevcore)
 add_subdirectory(libdevcrypto)
 add_subdirectory(libethcore)
-add_subdirectory(evmc)
-add_subdirectory(libinterpreter)
-add_subdirectory(libevm)
+# add_subdirectory(libinterpreter)
+add_subdirectory(libstat)
+add_subdirectory(libflowlimit)
 add_subdirectory(libtxpool)
 add_subdirectory(libstorage)
 add_subdirectory(libprecompiled)
@@ -114,5 +109,5 @@ add_custom_target(doc COMMAND ${DOXYGEN_EXECUTABLE} ${doxyfile}
                        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
                        COMMENT "Generating documentation with Doxygen..." VERBATIM)
 elseif()
-  message(WARNING "Doxygen is needed to build the documentation. Please install doxygen and graphviz") 
+  message(WARNING "Doxygen is needed to build the documentation. Please install doxygen and graphviz")
 endif()

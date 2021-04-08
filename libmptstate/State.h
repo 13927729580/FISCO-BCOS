@@ -19,10 +19,10 @@
 
 #include "Account.h"
 #include "CodeSizeCache.h"
+#include "OverlayDB.h"
+#include "TrieDB.h"
 #include <libdevcore/Common.h>
-#include <libdevcore/OverlayDB.h>
 #include <libdevcore/RLP.h>
-#include <libdevcore/TrieDB.h>
 #include <libethcore/Exceptions.h>
 #include <array>
 #include <unordered_map>
@@ -287,8 +287,8 @@ public:
     bytes const& code(Address const& _addr) const;
 
     /// Get the code hash of an account.
-    /// @returns EmptySHA3 if no account exists at that address or if there is no code associated
-    /// with the address.
+    /// @returns EmptyHash if no account exists at that address or if there is no code
+    /// associated with the address.
     h256 codeHash(Address const& _contract) const;
 
     /// Get the byte-size of the code of an account.

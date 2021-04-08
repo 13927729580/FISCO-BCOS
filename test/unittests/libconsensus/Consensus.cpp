@@ -24,6 +24,7 @@
 #include "FakePBFTEngine.h"
 #include <libconsensus/Sealer.h>
 #include <libconsensus/pbft/PBFTSealer.h>
+#include <libdevcrypto/CryptoInterface.h>
 #include <libethcore/Protocol.h>
 #include <test/tools/libutils/TestOutputHelper.h>
 #include <boost/test/unit_test.hpp>
@@ -52,18 +53,17 @@ public:
         Address dst = toAddress(KeyPair::create().pub());
         std::string str = "transaction";
         bytes data(str.begin(), str.end());
-        Transaction tx(value, gasPrice, gas, dst, data);
-        Secret sec = KeyPair::create().secret();
+        auto keyPair = KeyPair::create();
         ///< Summit 10 transactions to txpool.
         const size_t txCnt = 10;
         for (size_t i = 0; i < txCnt; i++)
         {
-            tx.setNonce(tx.nonce() + u256(i));
-            tx.setBlockLimit(m_txpoolCreator->m_blockChain->number() + 2);
-            dev::Signature sig = sign(sec, tx.sha3(WithoutSignature));
-            tx.updateSignature(SignatureStruct(sig));
-            std::shared_ptr<Transaction> p_tx = std::make_shared<Transaction>(tx);
-            m_txpoolCreator->m_txPool->submitTransactions(p_tx);
+            auto tx = std::make_shared<Transaction>(value, gasPrice, gas, dst, data);
+            tx->setNonce(tx->nonce() + utcTime() + u256(i));
+            tx->setBlockLimit(m_txpoolCreator->m_blockChain->number() + 2);
+            auto sig = crypto::Sign(keyPair, tx->hash(WithoutSignature));
+            tx->updateSignature(sig);
+            m_txpoolCreator->m_txPool->submitTransactions(tx);
         }
         BOOST_CHECK(m_txpoolCreator->m_txPool->pendingSize() == txCnt);
         m_fakePBFT = std::make_shared<FakePBFTSealer>(m_txpoolCreator->m_topicService,
@@ -85,25 +85,25 @@ BOOST_AUTO_TEST_CASE(testLoadTransactions)
     ///< Load 4 transactions in txpool.
     fake_pbft->loadTransactions(4);
     ///< The following two checks ensure that the size of transactions is 4.
-    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcTime();
+    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcSteadyTime();
     BOOST_CHECK(fake_pbft->checkTxsEnough(4) == true);
-    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcTime();
+    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcSteadyTime();
     BOOST_CHECK(fake_pbft->checkTxsEnough(5) == false);
     ///< Load 10 transactions in txpool, critical magnitude.
-    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcTime();
+    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcSteadyTime();
     fake_pbft->loadTransactions(10);
     ///< The following two checks ensure that the size of transactions is 10.
-    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcTime();
+    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcSteadyTime();
     BOOST_CHECK(fake_pbft->checkTxsEnough(10) == true);
-    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcTime();
+    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcSteadyTime();
     /// the transaction pool is empty, stop sealing
     BOOST_CHECK(fake_pbft->checkTxsEnough(11) == false);
     ///< Load 12 transactions in txpool, actually only 10.
     fake_pbft->loadTransactions(12);
     ///< The following two checks ensure that the size of transactions is 10.
-    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcTime();
+    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcSteadyTime();
     BOOST_CHECK(fake_pbft->checkTxsEnough(10) == true);
-    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcTime();
+    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcSteadyTime();
     /// the transaction pool is empty, stop sealing
     BOOST_CHECK(fake_pbft->checkTxsEnough(11) == false);
 }
@@ -212,14 +212,14 @@ BOOST_AUTO_TEST_CASE(testReachBlockIntervalTime)
     BOOST_CHECK(fake_pbft->reachBlockIntervalTime() == true);
 
     /// test reach the min block generation time, while transaction num is 0
-    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcTime() - 600;
+    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcSteadyTime() - 600;
     BOOST_CHECK(fake_pbft->reachBlockIntervalTime() == false);
     /// load one transaction
     fake_pbft->loadTransactions(1);
     BOOST_CHECK(fake_pbft->reachBlockIntervalTime() == true);
 
     /// test not reach the min block generation time
-    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcTime() - 100;
+    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcSteadyTime() - 100;
     BOOST_CHECK(fake_pbft->reachBlockIntervalTime() == false);
 }
 
@@ -231,7 +231,7 @@ BOOST_AUTO_TEST_CASE(testDoWork)
     /// set this node to be the leader
     fake_pbft->engine()->setNodeIdx(fake_pbft->engine()->getLeader().second);
     fake_pbft->setStartConsensus(true);
-    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcTime() - 600;
+    fake_pbft->engine()->mutableTimeManager().m_lastConsensusTime = utcSteadyTime() - 600;
     /// m_sealing has not been sealed yet
     fake_pbft->resetSealingBlock();
     fake_pbft->engine()->setAccountType(NodeAccountType::SealerAccount);
@@ -275,11 +275,11 @@ BOOST_AUTO_TEST_CASE(testUpdateConsensusNodeList)
     {
         observerList.push_back(KeyPair::create().pub());
     }
+    std::sort(sealerList.begin(), sealerList.end());
     sealerFixture.m_txpoolCreator->m_blockChain->setSealerList(sealerList);
     sealerFixture.m_txpoolCreator->m_blockChain->setObserverList(observerList);
     fake_pbft->engine()->fakeUpdateConsensusNodeList();
     /// check sealerList
-    std::sort(sealerList.begin(), sealerList.end());
     BOOST_CHECK(fake_pbft->engine()->sealerList() == sealerList);
 }
 

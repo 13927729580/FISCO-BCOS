@@ -34,9 +34,9 @@ class SafeHttpServer : public jsonrpc::AbstractServerConnector
 
 public:
     /// "using HttpServer" won't work with msvc 2013, so we need to copy'n'paste constructor
-    SafeHttpServer(std::string const& _address, int _port,
+    SafeHttpServer(std::string const& _address, int _port, bool _ipv6 = false,
         std::string const& _sslcert = std::string(), std::string const& _sslkey = std::string(),
-        int _threads = 64);
+        int _threads = 4);
     virtual ~SafeHttpServer() {}
 
     virtual bool StartListening();
@@ -53,6 +53,7 @@ private:
     int port;
     int threads;
     bool running;
+    bool ipv6Enabled = false;
     std::string path_sslcert;
     std::string path_sslkey;
     std::string sslcert;

@@ -38,13 +38,16 @@ namespace eth
 class Block
 {
 public:
+    using SigListType = std::vector<std::pair<u256, std::vector<unsigned char>>>;
+    using SigListPtrType =
+        std::shared_ptr<std::vector<std::pair<u256, std::vector<unsigned char>>>>;
     using Ptr = std::shared_ptr<Block>;
     ///-----constructors of Block
     Block()
     {
         m_transactions = std::make_shared<Transactions>();
         m_transactionReceipts = std::make_shared<TransactionReceipts>();
-        m_sigList = std::make_shared<std::vector<std::pair<u256, Signature>>>();
+        m_sigList = std::make_shared<SigListType>();
     }
     explicit Block(bytesConstRef _data,
         CheckTransaction const _option = CheckTransaction::Everything, bool _withReceipt = true,
@@ -126,7 +129,7 @@ public:
     BlockHeader const& blockHeader() const { return m_blockHeader; }
     BlockHeader& header() { return m_blockHeader; }
     h256 headerHash() const { return m_blockHeader.hash(); }
-    std::shared_ptr<std::vector<std::pair<u256, Signature>>> sigList() const { return m_sigList; }
+    SigListPtrType sigList() const { return m_sigList; }
 
     std::shared_ptr<std::vector<u256>> getAllNonces() const
     {
@@ -170,10 +173,7 @@ public:
     /// set block header
     void setBlockHeader(BlockHeader const& _blockHeader) { m_blockHeader = _blockHeader; }
     /// set sig list
-    void inline setSigList(std::shared_ptr<std::vector<std::pair<u256, Signature>>> _sigList)
-    {
-        m_sigList = _sigList;
-    }
+    void inline setSigList(SigListPtrType _sigList) { m_sigList = _sigList; }
     /// get hash of block header
     h256 blockHeaderHash() { return m_blockHeader.hash(); }
     bool isSealed() const { return (m_blockHeader.sealer() != Invalid256); }
@@ -183,6 +183,7 @@ public:
     h256 const transactionRoot() { return header().transactionsRoot(); }
     h256 const receiptRoot() { return header().receiptsRoot(); }
 
+    int64_t blockSize() const { return m_blockSize; }
     /**
      * @brief: reset the current block
      *  1. if the blockHeader param has been set, then populate a new block header from the
@@ -264,7 +265,7 @@ public:
     void calReceiptRoot(bool update = true) const;
     void calReceiptRootRC2(bool update = true) const;
     void calTransactionRootV2_2_0(bool update) const;
-    void getReceiptAndSha3(RLPStream& txReceipts, std::vector<dev::bytes>& receiptList) const;
+    void getReceiptAndHash(RLPStream& txReceipts, std::vector<dev::bytes>& receiptList) const;
     void calReceiptRootV2_2_0(bool update) const;
 
     std::shared_ptr<std::map<std::string, std::vector<std::string>>> getReceiptProof() const;
@@ -290,13 +291,13 @@ public:
         }
     }
 
-protected:
     /// callback this function when transaction has been changed
     void noteChange()
     {
         WriteGuard l_txscache(x_txsCache);
         m_txsCache = bytes();
     }
+protected:
 
     /// callback this function when transaction receipt has been changed
     void noteReceiptChange()
@@ -312,7 +313,7 @@ protected:
     mutable std::shared_ptr<Transactions> m_transactions;
     std::shared_ptr<TransactionReceipts> m_transactionReceipts;
     /// sig list (field 3)
-    std::shared_ptr<std::vector<std::pair<u256, Signature>>> m_sigList;
+    SigListPtrType m_sigList;
     /// m_transactions converted bytes, when m_transactions changed,
     /// should refresh this catch when encode
 
@@ -324,6 +325,8 @@ protected:
 
     mutable dev::h256 m_transRootCache;
     mutable dev::h256 m_receiptRootCache;
+
+    int64_t m_blockSize = 0;
 };
 }  // namespace eth
 }  // namespace dev

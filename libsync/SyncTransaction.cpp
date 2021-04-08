@@ -36,14 +36,26 @@ static unsigned const c_maxSendTransactions = 1000;
 void SyncTransaction::start()
 {
     startWorking();
+    m_running.store(true);
+    SYNC_LOG(DEBUG) << LOG_DESC("start SyncTransaction") << LOG_KV("groupId", m_groupId);
 }
 
 void SyncTransaction::stop()
 {
-    doneWorking();
-    stopWorking();
-    // will not restart worker, so terminate it
-    terminate();
+    if (m_running.load())
+    {
+        m_running.store(false);
+        doneWorking();
+        stopWorking();
+        // will not restart worker, so terminate it
+        terminate();
+        SYNC_LOG(DEBUG) << LOG_DESC("stop SyncTransaction") << LOG_KV("groupId", m_groupId);
+    }
+    else
+    {
+        SYNC_LOG(DEBUG) << LOG_DESC("SyncTransaction already stopped")
+                        << LOG_KV("groupId", m_groupId);
+    }
 }
 
 void SyncTransaction::doWork()
@@ -70,8 +82,8 @@ void SyncTransaction::workLoop()
         // no new transactions and the size of transactions need to be broadcasted is zero
         if (idleWaitMs() && !m_newTransactions && m_txQueue->bufferSize() == 0)
         {
-            std::unique_lock<std::mutex> l(x_signalled);
-            m_signalled.wait_for(l, std::chrono::milliseconds(idleWaitMs()));
+            boost::unique_lock<boost::mutex> l(x_signalled);
+            m_signalled.wait_for(l, boost::chrono::milliseconds(idleWaitMs()));
         }
     }
 }
@@ -114,16 +126,19 @@ void SyncTransaction::sendTransactions(std::shared_ptr<Transactions> _ts,
     }
 
     // send the transactions from RPC
-    broadcastTransactions(selectedPeers, _ts, _fastForwardRemainTxs, _startIndex, true);
-    if (!_fastForwardRemainTxs)
+    broadcastTransactions(selectedPeers, _ts, _fastForwardRemainTxs, _startIndex);
+    if (!_fastForwardRemainTxs && m_running.load())
     {
+        // Added sleep to prevent excessive redundant transaction message packets caused by
+        // transaction status spreading too fast
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
         sendTxsStatus(_ts, selectedPeers);
     }
 }
 
 void SyncTransaction::broadcastTransactions(std::shared_ptr<NodeIDs> _selectedPeers,
     std::shared_ptr<Transactions> _ts, bool const& _fastForwardRemainTxs,
-    int64_t const& _startIndex, bool const& _fromRpc)
+    int64_t const& _startIndex)
 {
     unordered_map<NodeID, std::vector<size_t>> peerTransactions;
     auto endIndex =
@@ -136,8 +151,6 @@ void SyncTransaction::broadcastTransactions(std::shared_ptr<NodeIDs> _selectedPe
     {
         consIndex = m_treeRouter->consIndex();
     }
-
-    UpgradableGuard l(m_txPool->xtransactionKnownBy());
     for (ssize_t i = _startIndex; i <= endIndex; ++i)
     {
         auto t = (*_ts)[i];
@@ -145,39 +158,36 @@ void SyncTransaction::broadcastTransactions(std::shared_ptr<NodeIDs> _selectedPe
 
         int64_t selectSize = _selectedPeers->size();
         // add redundancy when receive transactions from P2P
-        if ((!t->rpcTx() || m_txPool->isTransactionKnownBySomeone(t->sha3())) &&
-            !_fastForwardRemainTxs)
+        if ((!t->rpcTx() || t->isKnownBySomeone()) && !_fastForwardRemainTxs)
         {
-            if (_fromRpc)
-            {
-                continue;
-            }
-            else
-            {
-                unsigned percent = 25;
-                selectSize = (selectSize * percent + 99) / 100;
-            }
+            continue;
         }
-        if (_fromRpc && m_treeRouter && !randomSelectedPeersInited)
+        if (m_treeRouter && !randomSelectedPeersInited && !_fastForwardRemainTxs)
         {
-            randomSelectedPeers = m_treeRouter->selectNodes(m_syncStatus->peersSet(), consIndex);
+            randomSelectedPeers =
+                m_treeRouter->selectNodes(m_syncStatus->peersSet(), consIndex, true);
             randomSelectedPeersInited = true;
+        }
+        // the randomSelectedPeers is empty
+        if (randomSelectedPeers->size() == 0)
+        {
+            randomSelectedPeersInited = false;
+            continue;
         }
         peers = m_syncStatus->filterPeers(
             selectSize, randomSelectedPeers, [&](std::shared_ptr<SyncPeerStatus> _p) {
-                bool unsent =
-                    !m_txPool->isTransactionKnownBy(t->sha3(), m_nodeId) || _fastForwardRemainTxs;
+                bool unsent = !t->isTheNodeContainsTransaction(m_nodeId) || _fastForwardRemainTxs;
                 bool isSealer = _p->isSealer;
-                return isSealer && unsent && !m_txPool->isTransactionKnownBy(t->sha3(), _p->nodeId);
+                return isSealer && unsent && !t->isTheNodeContainsTransaction(_p->nodeId);
             });
-        UpgradeGuard ul(l);
-        m_txPool->setTransactionIsKnownBy(t->sha3(), m_nodeId);
+
+        t->appendNodeContainsTransaction(m_nodeId);
         if (0 == peers.size())
             continue;
         for (auto const& p : peers)
         {
             peerTransactions[p].push_back(i);
-            m_txPool->setTransactionIsKnownBy(t->sha3(), p);
+            t->appendNodeContainsTransaction(p);
         }
     }
 
@@ -194,7 +204,7 @@ void SyncTransaction::broadcastTransactions(std::shared_ptr<NodeIDs> _selectedPe
 
 
         std::shared_ptr<SyncTransactionsPacket> packet = std::make_shared<SyncTransactionsPacket>();
-        if (m_treeRouter && _fromRpc)
+        if (m_treeRouter)
         {
             packet->encode(txRLPs, true, consIndex);
         }
@@ -202,24 +212,14 @@ void SyncTransaction::broadcastTransactions(std::shared_ptr<NodeIDs> _selectedPe
         {
             packet->encode(txRLPs);
         }
-
-        auto msg = packet->toMessage(m_protocolId, _fromRpc);
+        auto msg = packet->toMessage(m_protocolId, (!_fastForwardRemainTxs));
         m_service->asyncSendMessageByNodeID(_p->nodeId, msg, CallbackFuncWithSession(), Options());
-
-        // update sended txs information
-        if (m_statisticHandler)
-        {
-            m_statisticHandler->updateSendedTxsInfo(txsSize, msg->length());
-        }
-
         SYNC_LOG(DEBUG) << LOG_BADGE("Tx") << LOG_DESC("Send transaction to peer")
                         << LOG_KV("txNum", int(txsSize))
                         << LOG_KV("fastForwardRemainTxs", _fastForwardRemainTxs)
                         << LOG_KV("startIndex", _startIndex)
                         << LOG_KV("toNodeId", _p->nodeId.abridged())
-                        << LOG_KV("messageSize(B)", msg->buffer()->size())
-                        << LOG_KV("fromRpc", _fromRpc);
-        ;
+                        << LOG_KV("messageSize(B)", msg->buffer()->size());
         return true;
     });
 }
@@ -240,6 +240,11 @@ void SyncTransaction::forwardRemainingTxs()
         sendTransactions(ts, m_needForwardRemainTxs, startIndex);
         startIndex += c_maxSendTransactions;
     }
+    for (auto const& targetNode : *m_fastForwardedNodes)
+    {
+        SYNC_LOG(DEBUG) << LOG_DESC("forwardRemainingTxs") << LOG_KV("txsSize", currentTxsSize)
+                        << LOG_KV("targetNode", targetNode.abridged());
+    }
     m_needForwardRemainTxs = false;
     m_fastForwardedNodes->clear();
 }
@@ -254,34 +259,36 @@ void SyncTransaction::sendTxsStatus(
     std::shared_ptr<dev::eth::Transactions> _txs, std::shared_ptr<NodeIDs> _selectedPeers)
 {
     unsigned percent = 25;
-    int64_t selectSize = (_selectedPeers->size() * percent + 99) / 100;
-    WriteGuard l(m_txPool->xtransactionKnownBy());
-    for (auto tx : *_txs)
+    unsigned expectedSelectSize = (_selectedPeers->size() * percent + 99) / 100;
+    int64_t selectSize = std::min(expectedSelectSize, m_txsStatusGossipMaxPeers);
+    std::map<dev::h512, std::shared_ptr<std::set<dev::h256>>> txsHash;
     {
-        auto peers = m_syncStatus->filterPeers(
-            selectSize, _selectedPeers, [&](std::shared_ptr<SyncPeerStatus> _p) {
-                bool unsent = !m_txPool->isTransactionKnownBy(tx->sha3(), m_nodeId);
-                bool isSealer = _p->isSealer;
-                return isSealer && unsent &&
-                       !m_txPool->isTransactionKnownBy(tx->sha3(), _p->nodeId);
-            });
-        if (peers.size() == 0)
+        for (auto tx : *_txs)
         {
-            continue;
-        }
-        for (auto const& peer : peers)
-        {
-            if (!m_txsHash->count(peer))
+            auto peers = m_syncStatus->filterPeers(
+                selectSize, _selectedPeers, [&](std::shared_ptr<SyncPeerStatus> _p) {
+                    bool unsent = !tx->isTheNodeContainsTransaction(m_nodeId);
+                    bool isSealer = _p->isSealer;
+                    return isSealer && unsent && !tx->isTheNodeContainsTransaction(_p->nodeId);
+                });
+            if (peers.size() == 0)
             {
-                m_txsHash->insert(std::make_pair(peer, std::make_shared<std::set<dev::h256>>()));
+                continue;
             }
-            (*m_txsHash)[peer]->insert(tx->sha3());
-            m_txPool->setTransactionIsKnownBy(tx->sha3(), peer);
+            tx->appendNodeListContainTransaction(peers);
+            tx->appendNodeContainsTransaction(m_nodeId);
+            for (auto peer : peers)
+            {
+                if (!txsHash.count(peer))
+                {
+                    txsHash[peer] = std::make_shared<std::set<dev::h256>>();
+                }
+                txsHash[peer]->insert(tx->hash());
+            }
         }
-        m_txPool->setTransactionIsKnownBy(tx->sha3(), m_nodeId);
     }
     auto blockNumber = m_blockChain->number();
-    for (auto const& it : *m_txsHash)
+    for (auto const& it : txsHash)
     {
         std::shared_ptr<SyncTxsStatusPacket> txsStatusPacket =
             std::make_shared<SyncTxsStatusPacket>();
@@ -297,5 +304,32 @@ void SyncTransaction::sendTxsStatus(
                         << LOG_KV("toNode", it.first.abridged())
                         << LOG_KV("messageSize(B)", p2pMsg->length());
     }
-    m_txsHash->clear();
+}
+
+void SyncTransaction::updateNeedMaintainTransactions(bool const& _needMaintainTxs)
+{
+    if (_needMaintainTxs != m_needMaintainTransactions)
+    {
+        // changed from sealer/observer to free-node
+        if (m_needMaintainTransactions)
+        {
+            SYNC_LOG(DEBUG) << LOG_DESC(
+                                   "updateNeedMaintainTransactions: node changed from "
+                                   "sealer/observer to free-node, freshTxsStatus")
+                            << LOG_KV("isSealerOrObserver", _needMaintainTxs)
+                            << LOG_KV("isSealerOrObserverBeforeUpdate", m_needMaintainTransactions);
+            m_txPool->freshTxsStatus();
+        }
+        else
+        {
+            SYNC_LOG(DEBUG) << LOG_DESC(
+                                   "updateNeedMaintainTransactions: node changed from free-node to "
+                                   "sealer/observer, noteNewTransactions")
+                            << LOG_KV("isSealerOrObserver", _needMaintainTxs)
+                            << LOG_KV("isSealerOrObserverBeforeUpdate", m_needMaintainTransactions);
+            // changed from free-node into sealer/observer
+            noteNewTransactions();
+        }
+        m_needMaintainTransactions = _needMaintainTxs;
+    }
 }

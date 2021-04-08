@@ -21,6 +21,7 @@
  */
 
 #include "Initializer.h"
+#include "Common.h"
 #include "GlobalConfigureInitializer.h"
 
 using namespace dev;
@@ -37,11 +38,16 @@ void Initializer::init(std::string const& _path)
         /// init log
         m_logInitializer = std::make_shared<LogInitializer>();
         m_logInitializer->initLog(pt);
-
         /// init global config. must init before DB, for compatibility
         initGlobalConfig(pt);
 
-        /// init certificates
+        // init the statLog
+        if (g_BCOSConfig.enableStat())
+        {
+            m_logInitializer->initStatLog(pt);
+        }
+
+        // init certificates
         m_secureInitializer = std::make_shared<SecureInitializer>();
         m_secureInitializer->initConfig(pt);
 
@@ -64,7 +70,7 @@ void Initializer::init(std::string const& _path)
         m_ledgerInitializer->setChannelRPCServer(m_rpcInitializer->channelRPCServer());
         m_ledgerInitializer->initConfig(pt);
 
-        m_rpcInitializer->setLedgerManager(m_ledgerInitializer->ledgerManager());
+        m_rpcInitializer->setLedgerInitializer(m_ledgerInitializer);
         m_rpcInitializer->initConfig(pt);
         m_ledgerInitializer->startAll();
     }

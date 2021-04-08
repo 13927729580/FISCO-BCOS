@@ -22,6 +22,7 @@
 #pragma once
 
 #include <libdevcore/FixedHash.h>
+#include <libnetwork/Host.h>
 #include <libnetwork/SessionFace.h>
 #include <libp2p/Common.h>
 #include <libp2p/P2PMessage.h>
@@ -29,15 +30,26 @@
 
 namespace dev
 {
+namespace stat
+{
+class NetworkStatHandler;
+class ChannelNetworkStatHandler;
+}  // namespace stat
+namespace flowlimit
+{
+class RateLimiter;
+}
+
 namespace p2p
 {
 class P2PMessage;
 class P2PMessageFactory;
 class P2PSession;
-class StatisticHandler;
 typedef std::function<void(dev::network::NetworkException, std::shared_ptr<dev::p2p::P2PSession>,
     std::shared_ptr<dev::p2p::P2PMessage>)>
     CallbackFuncWithSession;
+typedef std::function<void(dev::network::NetworkException, std::shared_ptr<dev::p2p::P2PSession>)>
+    DisconnectCallbackFuncWithSession;
 typedef std::function<void(const std::string&, const std::string&)> CallbackFuncForTopicVerify;
 class P2PInterface
 {
@@ -60,8 +72,9 @@ public:
     virtual void asyncSendMessageByTopic(std::string topic, std::shared_ptr<P2PMessage> message,
         CallbackFuncWithSession callback, dev::network::Options options) = 0;
 
-    virtual void asyncMulticastMessageByTopic(
-        std::string topic, std::shared_ptr<P2PMessage> message) = 0;
+    virtual bool asyncMulticastMessageByTopic(std::string topic,
+        std::shared_ptr<P2PMessage> message,
+        std::shared_ptr<dev::flowlimit::RateLimiter> _bandwidthLimiter = nullptr) = 0;
 
     virtual void asyncMulticastMessageByNodeIDList(
         NodeIDs nodeIDs, std::shared_ptr<P2PMessage> message) = 0;
@@ -71,9 +84,12 @@ public:
 
     virtual void registerHandlerByProtoclID(
         PROTOCOL_ID protocolID, CallbackFuncWithSession handler) = 0;
+    virtual void registerDisconnectHandlerByProtocolID(
+        PROTOCOL_ID const&, DisconnectCallbackFuncWithSession)
+    {}
 
     virtual void removeHandlerByProtocolID(PROTOCOL_ID const&) {}
-
+    virtual void removeDisconnectHandlerByProtocolID(PROTOCOL_ID const&) {}
     virtual void registerHandlerByTopic(std::string topic, CallbackFuncWithSession handler) = 0;
 
     virtual P2PSessionInfos sessionInfos() = 0;
@@ -82,6 +98,8 @@ public:
     virtual bool isConnected(NodeID const& _nodeID) const = 0;
 
     virtual std::set<std::string> topics() = 0;
+
+    virtual std::shared_ptr<dev::network::Host> host() = 0;
 
     virtual dev::h512s getNodeListByGroupID(GROUP_ID groupID) = 0;
     virtual void setGroupID2NodeList(std::map<GROUP_ID, dev::h512s> _groupID2NodeList) = 0;
@@ -96,7 +114,18 @@ public:
     virtual CallbackFuncForTopicVerify callbackFuncForTopicVerify() = 0;
 
     virtual std::shared_ptr<dev::p2p::P2PSession> getP2PSessionByNodeId(NodeID const& _nodeID) = 0;
-    virtual std::shared_ptr<StatisticHandler> statisticHandler() { return nullptr; }
+    virtual void appendNetworkStatHandlerByGroupID(
+        GROUP_ID const&, std::shared_ptr<dev::stat::NetworkStatHandler>)
+    {}
+    virtual void removeNetworkStatHandlerByGroupID(GROUP_ID const&) {}
+
+    virtual void setNodeBandwidthLimiter(std::shared_ptr<dev::flowlimit::RateLimiter>) {}
+    virtual void registerGroupBandwidthLimiter(
+        GROUP_ID const&, std::shared_ptr<dev::flowlimit::RateLimiter>)
+    {}
+    virtual void removeGroupBandwidthLimiter(GROUP_ID const&) {}
+    virtual void setChannelNetworkStatHandler(std::shared_ptr<dev::stat::ChannelNetworkStatHandler>)
+    {}
 };
 
 }  // namespace p2p

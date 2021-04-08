@@ -69,7 +69,6 @@ bytes TxsParallelParser::encode(std::shared_ptr<Transactions> _txs)
     for (size_t i = 0; i < txNum; ++i)
         ret += txRLPs[i];
 
-    // std::cout << "tx encode:" << toHex(ret) << std::endl;
     return ret;
 }
 
@@ -101,7 +100,6 @@ bytes TxsParallelParser::encode(std::vector<bytes> const& _txs)
 
     ret += txBytes;
 
-    // std::cout << "tx encode:" << toHex(ret) << std::endl;
     return ret;
 }
 
@@ -120,7 +118,6 @@ void TxsParallelParser::decode(std::shared_ptr<Transactions> _txs, bytesConstRef
         size_t bytesSize = _bytes.size();
         if (bytesSize == 0)
             return;
-        // std::cout << "tx decode:" << toHex(_bytes) << std::endl;
         Offset_t txNum = fromBytes(_bytes.cropped(0));
         // check txNum
         size_t objectStart = sizeof(Offset_t) * (txNum + 2);
@@ -160,14 +157,13 @@ void TxsParallelParser::decode(std::shared_ptr<Transactions> _txs, bytesConstRef
                         (*_txs)[i]->decode(txBytes.cropped(offset, size), _checkSig);
                         if (_withHash)
                         {
-                            dev::h256 txHash = dev::sha3(txBytes.cropped(offset, size));
-                            (*_txs)[i]->updateTransactionHashWithSig(txHash);
-                        } /*
-                         LOG(DEBUG) << LOG_BADGE("DECODE") << LOG_DESC("decode tx:") << LOG_KV("i",
-                         i)
-                                    << LOG_KV("offset", offset)
-                                    << LOG_KV("code", toHex(txBytes.cropped(offset, size)));
-                                    */
+                            // cache the keccak256
+                            // Note: can't calculate keccak256 with
+                            // keccak256(txBytes.cropped(offset, size)) directly
+                            //       considering that some cases the encodedData is not
+                            //       equal to txBytes.cropped(offset, size)
+                            (*_txs)[i]->hash();
+                        }
                     }
                 });
         }
@@ -178,7 +174,7 @@ void TxsParallelParser::decode(std::shared_ptr<Transactions> _txs, bytesConstRef
     }
     catch (Exception& e)
     {
-        throwInvalidBlockFormat(e.what());
+        throwInvalidBlockFormat(boost::diagnostic_information(e));
     }
 }
 

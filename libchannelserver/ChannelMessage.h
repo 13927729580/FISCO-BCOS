@@ -44,19 +44,20 @@ namespace channel
 {
 enum ChannelMessageType
 {
-    CHANNEL_RPC_REQUEST = 0x12,        // type for rpc request
-    CLIENT_HEARTBEAT = 0x13,           // type for heart beat for sdk
-    CLIENT_HANDSHAKE = 0x14,           // type for hand shake
-    CLIENT_REGISTER_EVENT_LOG = 0x15,  // type for event log filter register request and response
-    AMOP_REQUEST = 0x30,               // type for request from sdk
-    AMOP_RESPONSE = 0x31,              // type for response to sdk
-    AMOP_CLIENT_TOPICS = 0x32,         // type for topic request
-    AMOP_MULBROADCAST = 0x35,          // type for mult broadcast
-    REQUEST_TOPICCERT = 0x37,          // type request verify
-    UPDATE_TOPIICSTATUS = 0x38,        // type for update status
-    TRANSACTION_NOTIFY = 0x1000,       // type for  transaction notify
-    BLOCK_NOTIFY = 0x1001,             // type for  block notify
-    EVENT_LOG_PUSH = 0x1002            // type for event log push
+    CHANNEL_RPC_REQUEST = 0x12,           // type for rpc request
+    CLIENT_HEARTBEAT = 0x13,              // type for heart beat for sdk
+    CLIENT_HANDSHAKE = 0x14,              // type for hand shake
+    CLIENT_REGISTER_EVENT_LOG = 0x15,     // type for event log filter register request and response
+    CLIENT_UNREGISTER_EVENT_LOG = 0x16,   // type for event log filter unregister request and response
+    AMOP_REQUEST = 0x30,                  // type for request from sdk
+    AMOP_RESPONSE = 0x31,                 // type for response to sdk
+    AMOP_CLIENT_SUBSCRIBE_TOPICS = 0x32,  // type for topic request
+    AMOP_MULBROADCAST = 0x35,             // type for mult broadcast
+    REQUEST_TOPICCERT = 0x37,             // type request verify
+    UPDATE_TOPIICSTATUS = 0x38,           // type for update status
+    TRANSACTION_NOTIFY = 0x1000,          // type for  transaction notify
+    BLOCK_NOTIFY = 0x1001,                // type for  block notify
+    EVENT_LOG_PUSH = 0x1002               // type for event log push
 };
 
 class ChannelMessage : public Message
@@ -69,6 +70,7 @@ public:
 
     virtual void encode(bytes& buffer)
     {
+        m_length = HEADER_LENGTH + m_data->size();
         uint32_t lengthN = htonl(HEADER_LENGTH + m_data->size());
         uint16_t typeN = htons(m_type);
         int32_t resultN = htonl(m_result);
@@ -148,11 +150,11 @@ public:
     virtual std::string topic()
     {
         if (!(m_type == AMOP_REQUEST || m_type == AMOP_RESPONSE || m_type == TRANSACTION_NOTIFY ||
-                m_type == CLIENT_REGISTER_EVENT_LOG))
+                m_type == CLIENT_REGISTER_EVENT_LOG || m_type == CLIENT_UNREGISTER_EVENT_LOG))
         {
             throw(ChannelException(-1, "type: " + boost::lexical_cast<std::string>(m_type) +
                                            " Not ChannelMessage, ChannelMessage type must be 0x30, "
-                                           "0x31 or 0x1001 or 0x15"));
+                                           "0x31 or 0x1001 or 0x15 or 0x16"));
         }
 
         if (m_data->size() < 1)

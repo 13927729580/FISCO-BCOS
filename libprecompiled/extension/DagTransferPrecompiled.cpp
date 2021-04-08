@@ -153,21 +153,30 @@ Table::Ptr DagTransferPrecompiled::openTable(
     {
         dagTableName = precompiled::getTableName(DAG_TRANSFER);
     }
-    auto table = Precompiled::openTable(context, dagTableName);
+    auto table = dev::precompiled::openTable(context, dagTableName);
     if (!table)
-    {  //__dat_transfer__ is not exist, then create it first.
+    {
+        PRECOMPILED_LOG(DEBUG) << LOG_BADGE(
+                                      "DagTransferPrecompiled openTable: ready to create table")
+                               << LOG_KV("tableName", dagTableName);
+        //__dag_transfer__ is not exist, then create it first.
         table = createTable(
             context, dagTableName, DAG_TRANSFER_FIELD_NAME, DAG_TRANSFER_FIELD_BALANCE, origin);
-
-        PRECOMPILED_LOG(DEBUG) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC("open table")
-                               << LOG_DESC(" create __dag_transfer__ table. ");
+        // table already exists
+        if (!table)
+        {
+            PRECOMPILED_LOG(DEBUG) << LOG_BADGE("DagTransferPrecompiled: table already exist")
+                                   << LOG_KV("tableName", dagTableName);
+            // try to openTable and get the table again
+            table = dev::precompiled::openTable(context, dagTableName);
+        }
     }
-
     return table;
 }
 
-bytes DagTransferPrecompiled::call(
-    dev::blockverifier::ExecutiveContext::Ptr context, bytesConstRef param, Address const& origin)
+PrecompiledExecResult::Ptr DagTransferPrecompiled::call(
+    dev::blockverifier::ExecutiveContext::Ptr context, bytesConstRef param, Address const& origin,
+    Address const&)
 {
     // PRECOMPILED_LOG(TRACE) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC("call")
     //                       << LOG_KV("param", toHex(param));
@@ -175,28 +184,27 @@ bytes DagTransferPrecompiled::call(
     // parse function name
     uint32_t func = getParamFunc(param);
     bytesConstRef data = getParamData(param);
-
-    bytes out;
+    auto callResult = m_precompiledExecResultFactory->createPrecompiledResult();
     // user_name user_balance 2 fields in table, the key of table is user_name field
     if (func == name2Selector[DAG_TRANSFER_METHOD_ADD_STR_UINT])
     {  // userAdd(string,uint256)
-        userAddCall(context, data, origin, out);
+        userAddCall(context, data, origin, callResult->mutableExecResult());
     }
     else if (func == name2Selector[DAG_TRANSFER_METHOD_SAV_STR_UINT])
     {  // userSave(string,uint256)
-        userSaveCall(context, data, origin, out);
+        userSaveCall(context, data, origin, callResult->mutableExecResult());
     }
     else if (func == name2Selector[DAG_TRANSFER_METHOD_DRAW_STR_UINT])
     {  // userDraw(string,uint256)
-        userDrawCall(context, data, origin, out);
+        userDrawCall(context, data, origin, callResult->mutableExecResult());
     }
     else if (func == name2Selector[DAG_TRANSFER_METHOD_TRS_STR2_UINT])
     {  // userTransfer(string,string,uint256)
-        userTransferCall(context, data, origin, out);
+        userTransferCall(context, data, origin, callResult->mutableExecResult());
     }
     else if (func == name2Selector[DAG_TRANSFER_METHOD_BAL_STR])
     {  // userBalance(string user)
-        userBalanceCall(context, data, origin, out);
+        userBalanceCall(context, data, origin, callResult->mutableExecResult());
     }
     else
     {
@@ -207,7 +215,7 @@ bytes DagTransferPrecompiled::call(
     // PRECOMPILED_LOG(TRACE) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC("call")
     //                       << LOG_DESC("end");
 
-    return out;
+    return callResult;
 }
 
 void DagTransferPrecompiled::userAddCall(dev::blockverifier::ExecutiveContext::Ptr context,
@@ -233,7 +241,7 @@ void DagTransferPrecompiled::userAddCall(dev::blockverifier::ExecutiveContext::P
         if (!table)
         {
             strErrorMsg = "openTable failed.";
-            ret = CODE_INVALID_OPENTALBLE_FAILED;
+            ret = CODE_INVALID_OPENTABLE_FAILED;
             break;
         }
 
@@ -299,7 +307,7 @@ void DagTransferPrecompiled::userSaveCall(dev::blockverifier::ExecutiveContext::
         if (!table)
         {
             strErrorMsg = "openTable failed.";
-            ret = CODE_INVALID_OPENTALBLE_FAILED;
+            ret = CODE_INVALID_OPENTABLE_FAILED;
             break;
         }
 
@@ -387,7 +395,7 @@ void DagTransferPrecompiled::userDrawCall(dev::blockverifier::ExecutiveContext::
         if (!table)
         {
             strErrorMsg = "openTable failed.";
-            ret = CODE_INVALID_OPENTALBLE_FAILED;
+            ret = CODE_INVALID_OPENTABLE_FAILED;
             break;
         }
 
@@ -452,7 +460,7 @@ void DagTransferPrecompiled::userBalanceCall(dev::blockverifier::ExecutiveContex
         if (!table)
         {
             strErrorMsg = "openTable failed.";
-            ret = CODE_INVALID_OPENTALBLE_FAILED;
+            ret = CODE_INVALID_OPENTABLE_FAILED;
             break;
         }
 
@@ -514,7 +522,7 @@ void DagTransferPrecompiled::userTransferCall(
         if (!table)
         {
             strErrorMsg = "openTable failed.";
-            ret = CODE_INVALID_OPENTALBLE_FAILED;
+            ret = CODE_INVALID_OPENTABLE_FAILED;
             break;
         }
 

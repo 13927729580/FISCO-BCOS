@@ -26,7 +26,6 @@
 #include <libethcore/ABI.h>
 #include <libethcore/BlockHeader.h>
 #include <libethcore/Transaction.h>
-#include <libevm/ExtVMFace.h>
 #include <libexecutive/Executive.h>
 #include <libexecutive/StateFace.h>
 #include <libmptstate/MPTState.h>
@@ -45,7 +44,7 @@ static void FakeBlockHeader(BlockHeader& header, EvmParams const& param)
 }
 
 static void ExecuteTransaction(
-    ExecutionResult&, std::shared_ptr<MPTState> mptState, EnvInfo& info, Transaction::Ptr tx)
+    std::shared_ptr<MPTState> mptState, EnvInfo& info, Transaction::Ptr tx)
 {
     Executive executive(mptState, info, 0);
     executive.initialize(tx);
@@ -76,10 +75,7 @@ static void deployContract(
     Transaction::Ptr tx = std::make_shared<Transaction>(
         param.transValue(), param.gasPrice(), param.gas(), code, u256(0));
     updateSender(mptState, tx, param);
-    ExecutionResult res;
-    ExecuteTransaction(res, mptState, info, tx);
-    EVMC_LOG(INFO) << "[evm_main/newAddress]:" << toHex(res.newAddress);
-    EVMC_LOG(INFO) << "[evm_main/depositSize]:" << res.depositSize;
+    ExecuteTransaction(mptState, info, tx);
 }
 
 static void updateMptState(std::shared_ptr<MPTState> mptState, Input& input)
@@ -107,13 +103,7 @@ static void callTransaction(
     Transaction::Ptr tx = std::make_shared<Transaction>(
         param.transValue(), param.gasPrice(), param.gas(), input.addr, inputData, u256(0));
     updateSender(mptState, tx, param);
-    ExecutionResult res;
-    ExecuteTransaction(res, mptState, info, tx);
-    bytes output = std::move(res.output);
-    std::string result;
-    abi.abiOut(ref(output), result);
-    EVMC_LOG(INFO) << "[evm_main/callTransaction/output]: " << toHex(output);
-    EVMC_LOG(INFO) << "[evm_main/callTransaction/result string]: " << result;
+    ExecuteTransaction(mptState, info, tx);
 }
 
 int main()
@@ -130,7 +120,7 @@ int main()
     EnvInfo envInfo(header, boost::bind(&FakeBlockChain::numberHash, blockChain, _1), u256(0));
     /// init state
     std::shared_ptr<MPTState> mptState = std::make_shared<MPTState>(
-        u256(0), MPTState::openDB("./", sha3("0x1234")), BaseState::Empty);
+        u256(0), MPTState::openDB("./", keccak256("0x1234")), BaseState::Empty);
     /// test deploy
     for (size_t i = 0; i < param.code().size(); i++)
     {

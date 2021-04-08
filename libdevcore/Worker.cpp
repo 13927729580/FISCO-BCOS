@@ -51,8 +51,7 @@ void Worker::startWorking()
         m_state = WorkerState::Starting;
         m_state_notifier.notify_all();
         m_work.reset(new thread([&]() {
-/// set threadName for log
-#ifndef FISCO_EASYLOG
+            // set threadName for log
             if (boost::log::core::get())
             {
                 std::vector<std::string> fields;
@@ -63,7 +62,6 @@ void Worker::startWorking()
                         "GroupId", boost::log::attributes::constant<std::string>(fields[1]));
                 }
             }
-#endif
             setThreadName(m_name.c_str());
             while (m_state != WorkerState::Killing)
             {
@@ -84,8 +82,9 @@ void Worker::startWorking()
                 }
                 catch (std::exception const& e)
                 {
-                    LOG(ERROR) << "Exception thrown in Worker thread: "
-                               << boost::diagnostic_information(e);
+                    LOG(ERROR) << LOG_DESC("Exception thrown in Worker thread")
+                               << LOG_KV("threadName", m_name)
+                               << LOG_KV("errorMsg", boost::diagnostic_information(e));
                 }
 
                 {

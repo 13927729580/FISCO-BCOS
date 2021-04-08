@@ -63,6 +63,7 @@ public:
     {
         std::shared_ptr<Transactions> txs = std::make_shared<Transactions>();
         // Generate user + receiver = _userNum
+        auto keyPair = KeyPair::create();
         for (size_t i = 0; i < _userNum; i++)
         {
             u256 value = 0;
@@ -78,6 +79,8 @@ public:
             Transaction::Ptr tx =
                 std::make_shared<Transaction>(value, gasPrice, gas, dest, data, nonce);
             tx->setBlockLimit(250);
+            auto sig = dev::crypto::Sign(keyPair, tx->hash(WithoutSignature));
+            tx->updateSignature(sig);
             tx->forceSender(Address(0x2333));
             txs->push_back(tx);
         }
@@ -104,6 +107,7 @@ public:
     void genTxUserTransfer(Block& _block, size_t _userNum, size_t _txNum)
     {
         std::shared_ptr<Transactions> txs = std::make_shared<Transactions>();
+        auto keyPair = KeyPair::create();
         for (size_t i = 0; i < _txNum; i++)
         {
             u256 value = 0;
@@ -133,6 +137,8 @@ public:
             Transaction::Ptr tx =
                 std::make_shared<Transaction>(value, gasPrice, gas, dest, data, nonce);
             tx->setBlockLimit(250);
+            auto sig = dev::crypto::Sign(keyPair, tx->hash(WithoutSignature));
+            tx->updateSignature(sig);
             tx->forceSender(Address(0x2333));
             txs->push_back(tx);
         }
@@ -147,6 +153,7 @@ public:
     {
         // Just check no throw, no result checking
 
+        auto keyPair = KeyPair::create();
         for (size_t i = 0; i < _userNum; i++)
         {
             u256 value = 0;
@@ -160,6 +167,8 @@ public:
             Transaction::Ptr tx =
                 std::make_shared<Transaction>(value, gasPrice, gas, dest, data, nonce);
             tx->setBlockLimit(250);
+            auto sig = dev::crypto::Sign(keyPair, tx->hash(WithoutSignature));
+            tx->updateSignature(sig);
             tx->forceSender(Address(0x2333));
             BOOST_CHECK_NO_THROW(_verifier->executeTransaction(_block.header(), tx));
         }
@@ -186,8 +195,16 @@ public:
         blockChain->setStateStorage(dbInitializer->storage());
         blockChain->setTableFactoryFactory(dbInitializer->tableFactoryFactory());
 
-        GenesisBlockParam initParam = {"", dev::h512s(), dev::h512s(), "consensusType",
-            "storageType", "stateType", 5000, 300000000, 0};
+        auto initParam = std::make_shared<dev::ledger::LedgerParam>();
+        initParam->mutableGenesisMark() = "";
+        initParam->mutableConsensusParam().sealerList = dev::h512s();
+        initParam->mutableConsensusParam().observerList = dev::h512s();
+        initParam->mutableConsensusParam().consensusType = "consensusType";
+        initParam->mutableStorageParam().type = "storageType";
+        initParam->mutableStateParam().type = "stateType";
+        initParam->mutableConsensusParam().maxTransactions = 1000;
+        initParam->mutableTxParam().txGasLimit = 300000000;
+        initParam->mutableGenesisParam().timeStamp = 0;
         bool ret = blockChain->checkAndBuildGenesisBlock(initParam);
         BOOST_CHECK(ret);
 

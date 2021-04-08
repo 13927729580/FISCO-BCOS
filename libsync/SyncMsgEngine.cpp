@@ -160,58 +160,71 @@ bool SyncMsgEngine::interpret(
 void SyncMsgEngine::onPeerStatus(SyncMsgPacket const& _packet)
 {
     shared_ptr<SyncPeerStatus> status = m_syncStatus->peerStatus(_packet.nodeId);
-
-    RLP const& rlps = _packet.rlp();
-
-    if (rlps.itemCount() != 3)
+    // Note: m_syncMsgPacketFactory may be initialized behind SyncMsgEngine,
+    //       so here must judge whether m_syncMsgPacketFactory is nullptr
+    if (!m_syncMsgPacketFactory)
     {
-        SYNC_ENGINE_LOG(WARNING) << LOG_BADGE("Status")
-                                 << LOG_DESC("Receive invalid status packet format")
-                                 << LOG_KV("peer", _packet.nodeId.abridged());
         return;
     }
+    // decode
+    RLP const& rlps = _packet.rlp();
 
-    SyncPeerInfo info{
-        _packet.nodeId, rlps[0].toInt<int64_t>(), rlps[1].toHash<h256>(), rlps[2].toHash<h256>()};
+    SyncStatusPacket::Ptr info = m_syncMsgPacketFactory->createSyncStatusPacket();
+    info->decodePacket(rlps, _packet.nodeId);
 
-    if (info.genesisHash != m_genesisHash)
+    if (info->genesisHash != m_genesisHash)
     {
         SYNC_ENGINE_LOG(WARNING) << LOG_BADGE("Status")
                                  << LOG_DESC(
                                         "Receive invalid status packet with different genesis hash")
                                  << LOG_KV("peer", _packet.nodeId.abridged())
-                                 << LOG_KV("genesisHash", info.genesisHash);
+                                 << LOG_KV("genesisHash", info->genesisHash);
         return;
     }
 
     int64_t currentNumber = m_blockChain->number();
     if (status == nullptr)
     {
-        if (currentNumber < info.number)
+        if (currentNumber < info->number)
         {
             m_syncStatus->newSyncPeerStatus(info);
         }
         SYNC_ENGINE_LOG(DEBUG) << LOG_BADGE("Status")
                                << LOG_DESC("Receive status from unknown peer")
                                << LOG_KV("shouldAccept",
-                                      (currentNumber < info.number ? "true" : "false"))
-                               << LOG_KV("peer", info.nodeId.abridged())
-                               << LOG_KV("peerBlockNumber", info.number)
-                               << LOG_KV("genesisHash", info.genesisHash.abridged())
-                               << LOG_KV("latestHash", info.latestHash.abridged());
+                                      (currentNumber < info->number ? "true" : "false"))
+                               << LOG_KV("peer", info->nodeId.abridged())
+                               << LOG_KV("peerBlockNumber", info->number)
+                               << LOG_KV("genesisHash", info->genesisHash.abridged())
+                               << LOG_KV("latestHash", info->latestHash.abridged())
+                               << LOG_KV("peerTime", info->alignedTime);
     }
     else
     {
         SYNC_ENGINE_LOG(DEBUG) << LOG_BADGE("Status") << LOG_DESC("Receive status from peer")
-                               << LOG_KV("peerNodeId", info.nodeId.abridged())
-                               << LOG_KV("peerBlockNumber", info.number)
-                               << LOG_KV("genesisHash", info.genesisHash.abridged())
-                               << LOG_KV("latestHash", info.latestHash.abridged());
+                               << LOG_KV("peerNodeId", info->nodeId.abridged())
+                               << LOG_KV("peerBlockNumber", info->number)
+                               << LOG_KV("genesisHash", info->genesisHash.abridged())
+                               << LOG_KV("latestHash", info->latestHash.abridged())
+                               << LOG_KV("peerTime", info->alignedTime);
         status->update(info);
     }
-    if (currentNumber < info.number && m_onNotifyWorker)
+    if (currentNumber < info->number && m_onNotifyWorker)
     {
         m_onNotifyWorker();
+    }
+    // align time
+    if (m_nodeTimeMaintenance)
+    {
+        auto self = std::weak_ptr<SyncMsgEngine>(shared_from_this());
+        m_timeAlignWorker->enqueue([self, info]() {
+            auto msgEngine = self.lock();
+            if (!msgEngine)
+            {
+                return;
+            }
+            msgEngine->nodeTimeMaintenance()->tryToUpdatePeerTimeInfo(info);
+        });
     }
 }
 
@@ -340,6 +353,7 @@ void DownloadBlocksContainer::clearBatchAndSend()
     retPacket.encode(m_blockRLPsBatch);
 
     auto msg = retPacket.toMessage(m_protocolId);
+    msg->setPermitsAcquired(true);
     m_service->asyncSendMessageByNodeID(m_nodeId, msg, CallbackFuncWithSession(), Options());
     SYNC_ENGINE_LOG(INFO) << LOG_BADGE("Download") << LOG_BADGE("Request") << LOG_BADGE("BlockSync")
                           << LOG_DESC("Send block packet") << LOG_KV("peer", m_nodeId.abridged())
@@ -356,6 +370,7 @@ void DownloadBlocksContainer::sendBigBlock(bytes const& _blockRLP)
     retPacket.singleEncode(_blockRLP);
 
     auto msg = retPacket.toMessage(m_protocolId);
+    msg->setPermitsAcquired(true);
     m_service->asyncSendMessageByNodeID(m_nodeId, msg, CallbackFuncWithSession(), Options());
     SYNC_ENGINE_LOG(INFO) << LOG_BADGE("Rcv") << LOG_BADGE("Send") << LOG_BADGE("Download")
                           << LOG_DESC("Block back") << LOG_KV("peer", m_nodeId.abridged())
@@ -369,15 +384,15 @@ void SyncMsgEngine::onPeerTxsStatus(
     try
     {
         RLP const& rlps = _packet->rlp();
+        std::set<dev::h256> txsHash = rlps[1].toSet<dev::h256>();
         // pop all downloaded txs into the txPool
         while (m_txQueue->bufferSize() > 0)
         {
             m_txQueue->pop2TxPool(m_txPool);
         }
         auto blockNumber = m_blockChain->number();
-        std::set<dev::h256> txsHash = rlps[1].toSet<dev::h256>();
         // request transaction to the peer
-        auto requestTxs = m_txPool->filterUnknownTxs(txsHash);
+        auto requestTxs = m_txPool->filterUnknownTxs(txsHash, _peer);
         if (requestTxs->size() == 0)
         {
             return;
@@ -419,16 +434,13 @@ void SyncMsgEngine::onReceiveTxsRequest(
         for (auto tx : *txs)
         {
             txRLPs->emplace_back(tx->rlp(WithSignature));
+            tx->appendNodeContainsTransaction(_peer);
         }
         std::shared_ptr<SyncTransactionsPacket> txsPacket =
             std::make_shared<SyncTransactionsPacket>();
         txsPacket->encode(*txRLPs);
         auto p2pMsg = txsPacket->toMessage(m_protocolId);
         m_service->asyncSendMessageByNodeID(_peer, p2pMsg, CallbackFuncWithSession(), Options());
-        if (m_statisticHandler)
-        {
-            m_statisticHandler->updateSendedTxsInfo(txRLPs->size(), p2pMsg->length());
-        }
         SYNC_ENGINE_LOG(DEBUG) << LOG_BADGE("Rcv") << LOG_BADGE("onReceiveTxsRequest")
                                << LOG_KV("sendedTxsSize", txRLPs->size())
                                << LOG_KV("messageSize", p2pMsg->length())
@@ -460,6 +472,10 @@ void SyncMsgEngine::stop()
     if (m_txsReceiver)
     {
         m_txsReceiver->stop();
+    }
+    if (m_timeAlignWorker)
+    {
+        m_timeAlignWorker->stop();
     }
     SYNC_ENGINE_LOG(INFO) << LOG_DESC("SyncMsgEngine stopped");
 }

@@ -26,8 +26,9 @@
 #include "libstorage/ScalableStorage.h"
 #include <libblockverifier/ExecutiveContextFactory.h>
 #include <libchannelserver/ChannelRPCServer.h>
-#include <libdevcore/OverlayDB.h>
 #include <libexecutive/StateFactoryInterface.h>
+#include <libmptstate/OverlayDB.h>
+#include <libstorage/CachedStorage.h>
 #include <libstorage/MemoryTableFactory.h>
 #include <libstorage/MemoryTableFactory2.h>
 #include <libstorage/Storage.h>
@@ -85,6 +86,8 @@ public:
         m_channelRPCServer = channelRPCServer;
     }
 
+    void setSyncNumForCachedStorage(int64_t const& _syncNum);
+
 protected:
     dev::GROUP_ID m_groupID = 0;
     /// create stateStorage (mpt or storageState options)
@@ -103,7 +106,6 @@ private:
     dev::storage::Storage::Ptr initRocksDBStorage(std::shared_ptr<LedgerParamInterface> _param);
     dev::storage::Storage::Ptr initScalableStorage(std::shared_ptr<LedgerParamInterface> _param);
     void createStorageState();
-    void createMptState(dev::h256 const& genesisHash);
 
     dev::storage::Storage::Ptr initZdbStorage();
     void recoverFromBinaryLog(std::shared_ptr<dev::storage::BinLogHandler> _binaryLogger,
@@ -119,12 +121,11 @@ private:
     std::shared_ptr<ChannelRPCServer> m_channelRPCServer;
 
     dev::storage::TableFactoryFactory::Ptr m_tableFactoryFactory;
+    std::shared_ptr<dev::storage::CachedStorage> m_cacheStorage = nullptr;
 };
 int64_t getBlockNumberFromStorage(dev::storage::Storage::Ptr _storage);
-std::function<void(std::string&)> getDecryptHandler();
-std::function<void(std::string const&, std::string&)> getEncryptHandler();
 dev::storage::Storage::Ptr createRocksDBStorage(
-    const std::string& _dbPath, bool _enableEncryption, bool _disableWAL, bool _enableCache);
+    const std::string& _dbPath, const bytes& _encryptKey, bool _disableWAL, bool _enableCache);
 dev::storage::Storage::Ptr createSQLStorage(std::shared_ptr<LedgerParamInterface> _param,
     std::shared_ptr<ChannelRPCServer> _channelRPCServer,
     std::function<void(std::exception& e)> _fatalHandler);

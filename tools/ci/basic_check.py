@@ -33,7 +33,7 @@ class BasicCheck(object):
     """
     basic check include check sync and check consensus
     """
-    def __init__(self, rpc_port=8545, group = 1, node_num = 4, version = "2.2.0", rpc_ip = "127.0.0.1"):
+    def __init__(self, rpc_port=8545, group = 1, node_num = 4, version = "2.4.0", rpc_ip = "127.0.0.1"):
         self.rpc_port = rpc_port
         self.p2p_port = rpc_port + 1000
         self.channel_port = rpc_port + 2000
@@ -195,7 +195,9 @@ class BasicCheck(object):
         try:
             request_data = constructRequestData(method, param, rpc_id)
             url = "http://" + self.rpc_ip + ":" + str(self.rpc_port + node_id)
+            LOG_INFO("request: " + url)
             response = requests.post(url, data = request_data)
+            LOG_INFO("response: " + str(response))
             if (response.status_code == requests.codes.ok):
                 json_object = json.loads(response.text)
                 if("result" in json_object):

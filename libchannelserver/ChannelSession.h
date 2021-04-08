@@ -35,6 +35,7 @@
 #include <libdevcore/Common.h>
 #include <libdevcore/FixedHash.h>
 #include <libdevcore/Guards.h>
+#include <libstat/ChannelNetworkStatHandler.h>
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/asio/ssl/stream.hpp>
@@ -126,7 +127,22 @@ public:
     }
     std::string clientType() { return m_clientType; }
 
+    void setNetworkStat(dev::stat::ChannelNetworkStatHandler::Ptr _handler)
+    {
+        m_networkStat = _handler;
+    }
+
+    void setRemotePublicKey(dev::h512 const& _remotePublicKey)
+    {
+        CHANNEL_SESSION_LOG(INFO) << LOG_DESC("setRemotePublicKey: set sdk public key")
+                                  << LOG_KV("sdkPublicKey", _remotePublicKey.abridged());
+        m_remotePublicKey = _remotePublicKey;
+    }
+
+    dev::h512 const& remotePublicKey() { return m_remotePublicKey; }
+
 private:
+    bool isAMOPMessage(Message::Ptr _request);
     void startRead();
     void onRead(const boost::system::error_code& error, size_t bytesTransferred);
 
@@ -182,6 +198,9 @@ private:
         m_responseCallbacks.clear();
     }
 
+private:
+    dev::stat::ChannelNetworkStatHandler::Ptr m_networkStat;
+
     mutable SharedMutex x_responseCallbacks;
     std::map<std::string, ResponseCallback::Ptr> m_responseCallbacks;
 
@@ -217,7 +236,10 @@ private:
     dev::ProtocolVersion m_minimumProtocol = dev::ProtocolVersion::minVersion;
     dev::ProtocolVersion m_maximumProtocol = dev::ProtocolVersion::maxVersion;
     std::string m_clientType;
-    size_t _idleTime = 30000;
+    // set idle time interval to 60s
+    size_t _idleTime = 60;
+
+    dev::h512 m_remotePublicKey;
 };
 
 }  // namespace channel

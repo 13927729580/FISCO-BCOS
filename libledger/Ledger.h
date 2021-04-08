@@ -34,6 +34,7 @@
 #include <libeventfilter/EventLogFilterManager.h>
 #include <libp2p/P2PInterface.h>
 #include <libp2p/Service.h>
+#include <libstat/NetworkStatHandler.h>
 #include <boost/algorithm/string.hpp>
 #include <boost/property_tree/ptree.hpp>
 
@@ -46,6 +47,10 @@ namespace event
 class EventLogFilterManager;
 }
 
+namespace sync
+{
+class NodeTimeMaintenance;
+}
 namespace ledger
 {
 class Ledger : public LedgerInterface
@@ -59,10 +64,10 @@ public:
      * @param _baseDir: baseDir used to place the data of the ledger
      *                  (1) if _baseDir not empty, the group data is placed in
      * ${_baseDir}/group${_groupId}/${data_dir},
-     *                  ${data_dir} configurated by the configuration of the ledger, default is
+     *                  ${data_dir} configured by the configuration of the ledger, default is
      * "data" (2) if _baseDir is empty, the group data is placed in ./group${_groupId}/${data_dir}
      *
-     * @param configFileName: the configuration file path of the ledger, configurated by the
+     * @param configFileName: the configuration file path of the ledger, configured by the
      * main-configuration (1) if configFileName is empty, the configuration path is
      * ./group${_groupId}.ini, (2) if configFileName is not empty, the configuration path is decided
      * by the param ${configFileName}
@@ -82,6 +87,24 @@ public:
         BOOST_LOG_SCOPED_THREAD_ATTR(
             "GroupId", boost::log::attributes::constant<std::string>(std::to_string(m_groupId)));
         Ledger_LOG(INFO) << LOG_DESC("startAll...");
+
+        m_txPool->registerSyncStatusChecker([this]() {
+            try
+            {
+                // Refuse transaction if far syncing
+                if (m_sync->blockNumberFarBehind())
+                {
+                    BOOST_THROW_EXCEPTION(
+                        TransactionRefused() << errinfo_comment("ImportResult::NodeIsSyncing"));
+                }
+            }
+            catch (std::exception const& _e)
+            {
+                return false;
+            }
+            return true;
+        });
+        m_txPool->start();
         m_sync->start();
         m_sealer->start();
         m_eventLogFilterManger->start();
@@ -95,11 +118,36 @@ public:
         m_sealer->stop();
         Ledger_LOG(INFO) << LOG_DESC("sealer stopped. stop sync") << LOG_KV("groupID", groupId());
         m_sync->stop();
-        Ledger_LOG(INFO) << LOG_DESC("ledger stopped") << LOG_KV("groupID", groupId());
+        Ledger_LOG(INFO) << LOG_DESC("sync stopped. stop event filter manager")
+                         << LOG_KV("groupID", groupId());
         m_eventLogFilterManger->stop();
-        Ledger_LOG(INFO) << LOG_DESC("event filter manager stopped")
+        Ledger_LOG(INFO) << LOG_DESC("event filter manager stopped. stop tx pool")
                          << LOG_KV("groupID", groupId());
         m_txPool->stop();
+        if (m_service)
+        {
+            Ledger_LOG(INFO) << LOG_DESC(
+                                    "removeNetworkStatHandlerByGroupID and "
+                                    "removeGroupBandwidthLimiter for service")
+                             << LOG_KV("groupID", groupId());
+            m_service->removeNetworkStatHandlerByGroupID(groupId());
+            m_service->removeGroupBandwidthLimiter(groupId());
+        }
+        if (m_stopped)
+        {
+            return;
+        }
+        if (m_channelRPCServer && m_channelRPCServer->networkStatHandler())
+        {
+            Ledger_LOG(INFO) << LOG_DESC("removeNetworkStatHandlerByGroupID for channelRPCServer")
+                             << LOG_KV("groupID", groupId());
+            m_channelRPCServer->networkStatHandler()->removeGroupP2PStatHandler(groupId());
+        }
+        if (m_channelRPCServer)
+        {
+            m_channelRPCServer->removeSDKAllowListByGroupId(groupId());
+        }
+        m_stopped.store(true);
     }
 
     virtual ~Ledger(){};
@@ -137,33 +185,54 @@ public:
         return m_eventLogFilterManger;
     }
 
+    void reloadSDKAllowList() override;
+
 protected:
     virtual bool initTxPool();
     /// init blockverifier related
     virtual bool initBlockVerifier();
-    virtual bool initBlockChain(GenesisBlockParam& _genesisParam);
+    virtual bool initBlockChain();
     /// create consensus moudle
     virtual bool consensusInitFactory();
     /// init the blockSync
     virtual bool initSync();
     // init EventLogFilterManager
     virtual bool initEventLogFilterManager();
+    // init statHandler
+    virtual void initNetworkStatHandler();
+    // init NetworkStatHandler
+    virtual void initNetworkBandWidthLimiter();
 
-    void initGenesisMark(GenesisBlockParam& genesisParam);
+    // init QPSLimit
+    virtual void initQPSLimit();
+
     /// load ini config of group
-    void initIniConfig(std::string const& iniConfigFileName);
-    void initDBConfig(boost::property_tree::ptree const& pt);
-
     dev::consensus::ConsensusInterface::Ptr createConsensusEngine(
         dev::PROTOCOL_ID const& _protocolId);
     dev::eth::BlockFactory::Ptr createBlockFactory();
     void initPBFTEngine(dev::consensus::Sealer::Ptr _sealer);
+    void initrPBFTEngine(dev::consensus::Sealer::Ptr _sealer);
 
 private:
+    void setSDKAllowList(dev::h512s const& _sdkList);
     /// create PBFTConsensus
     std::shared_ptr<dev::consensus::Sealer> createPBFTSealer();
     /// create RaftConsensus
     std::shared_ptr<dev::consensus::Sealer> createRaftSealer();
+
+    bool inline normalrPBFTEnabled()
+    {
+        return (dev::stringCmpIgnoreCase(m_param->mutableConsensusParam().consensusType, "rpbft") ==
+                   0) &&
+               (g_BCOSConfig.version() < V2_6_0);
+    }
+
+    bool inline vrfBasedrPBFTEnabled()
+    {
+        return (dev::stringCmpIgnoreCase(m_param->mutableConsensusParam().consensusType, "rpbft") ==
+                   0) &&
+               (g_BCOSConfig.version() >= V2_6_0);
+    }
 
 protected:
     std::shared_ptr<LedgerParamInterface> m_param = nullptr;
@@ -176,9 +245,18 @@ protected:
     std::shared_ptr<dev::consensus::Sealer> m_sealer = nullptr;
     std::shared_ptr<dev::sync::SyncInterface> m_sync = nullptr;
     std::shared_ptr<dev::event::EventLogFilterManager> m_eventLogFilterManger = nullptr;
+    // for network statistic
+    std::shared_ptr<dev::stat::NetworkStatHandler> m_networkStatHandler = nullptr;
+    // for network bandwidth limitation
+    dev::flowlimit::RateLimiter::Ptr m_networkBandwidthLimiter = nullptr;
 
     std::shared_ptr<dev::ledger::DBInitializer> m_dbInitializer = nullptr;
     ChannelRPCServer::Ptr m_channelRPCServer;
+    std::atomic_bool m_stopped = {false};
+
+    dev::eth::Handler<int64_t> m_handler;
+
+    std::shared_ptr<dev::sync::NodeTimeMaintenance> m_nodeTimeMaintenance;
 };
 }  // namespace ledger
 }  // namespace dev

@@ -54,86 +54,16 @@ std::string TableFactoryPrecompiled::toString()
     return "TableFactory";
 }
 
-void TableFactoryPrecompiled::checkNameValidate(
-    const std::string& tableName, std::string& keyField, std::vector<std::string>& valueFieldList)
+
+PrecompiledExecResult::Ptr TableFactoryPrecompiled::call(ExecutiveContext::Ptr context,
+    bytesConstRef param, Address const& origin, Address const& sender)
 {
-    if (g_BCOSConfig.version() >= V2_2_0)
-    {
-        set<string> valueFieldSet;
-        boost::trim(keyField);
-        valueFieldSet.insert(keyField);
-
-        std::vector<char> allowChar = {'$', '_', '@'};
-
-        auto checkTableNameValidate = [allowChar](const std::string& tableName) {
-            size_t iSize = tableName.size();
-            for (size_t i = 0; i < iSize; i++)
-            {
-                if (!isalnum(tableName[i]) &&
-                    (allowChar.end() == find(allowChar.begin(), allowChar.end(), tableName[i])))
-                {
-                    STORAGE_LOG(ERROR)
-                        << LOG_DESC("invalidate tablename") << LOG_KV("table name", tableName);
-                    BOOST_THROW_EXCEPTION(StorageException(CODE_TABLE_INVALIDATE_FIELD,
-                        std::string("invalidate tablename:") + tableName));
-                }
-            }
-        };
-        auto checkFieldNameValidate = [allowChar](const std::string& tableName,
-                                          const std::string& fieldName) {
-            if (fieldName.size() == 0 || fieldName[0] == '_')
-            {
-                STORAGE_LOG(ERROR) << LOG_DESC("error key") << LOG_KV("field name", fieldName)
-                                   << LOG_KV("table name", tableName);
-                BOOST_THROW_EXCEPTION(StorageException(
-                    CODE_TABLE_INVALIDATE_FIELD, std::string("invalidate field:") + fieldName));
-            }
-            size_t iSize = fieldName.size();
-            for (size_t i = 0; i < iSize; i++)
-            {
-                if (!isalnum(fieldName[i]) &&
-                    (allowChar.end() == find(allowChar.begin(), allowChar.end(), fieldName[i])))
-                {
-                    STORAGE_LOG(ERROR)
-                        << LOG_DESC("invalidate fieldname") << LOG_KV("field name", fieldName)
-                        << LOG_KV("table name", tableName);
-                    BOOST_THROW_EXCEPTION(StorageException(
-                        CODE_TABLE_INVALIDATE_FIELD, std::string("invalidate field:") + fieldName));
-                }
-            }
-        };
-
-        checkTableNameValidate(tableName);
-        checkFieldNameValidate(tableName, keyField);
-
-        for (auto& valueField : valueFieldList)
-        {
-            auto ret = valueFieldSet.insert(valueField);
-            if (!ret.second)
-            {
-                STORAGE_LOG(ERROR)
-                    << LOG_DESC("dumplicate field") << LOG_KV("field name", valueField)
-                    << LOG_KV("table name", tableName);
-                BOOST_THROW_EXCEPTION(StorageException(
-                    CODE_TABLE_DUMPLICATE_FIELD, std::string("dumplicate field:") + valueField));
-            }
-            checkFieldNameValidate(tableName, valueField);
-        }
-    }
-}
-
-
-bytes TableFactoryPrecompiled::call(
-    ExecutiveContext::Ptr context, bytesConstRef param, Address const& origin)
-{
-    STORAGE_LOG(TRACE) << LOG_BADGE("TableFactoryPrecompiled") << LOG_DESC("call")
-                       << LOG_KV("param", toHex(param));
-
     uint32_t func = getParamFunc(param);
     bytesConstRef data = getParamData(param);
 
     dev::eth::ContractABI abi;
-    bytes out;
+    auto callResult = m_precompiledExecResultFactory->createPrecompiledResult();
+    callResult->gasPricer()->setMemUsed(param.size());
 
     if (func == name2Selector[TABLE_METHOD_OPT_STR])
     {  // openTable(string)
@@ -143,6 +73,7 @@ bytes TableFactoryPrecompiled::call(
 
         Address address;
         auto table = m_memoryTableFactory->openTable(tableName);
+        callResult->gasPricer()->appendOperation(InterfaceOpcode::OpenTable);
         if (table)
         {
             TablePrecompiled::Ptr tablePrecompiled = make_shared<TablePrecompiled>();
@@ -155,22 +86,30 @@ bytes TableFactoryPrecompiled::call(
                                  << LOG_DESC("Open new table failed")
                                  << LOG_KV("table name", tableName);
         }
-
-        out = abi.abiIn("", address);
+        callResult->setExecResult(abi.abiIn("", address));
     }
     else if (func == name2Selector[TABLE_METHOD_CRT_STR_STR])
     {  // createTable(string,string,string)
+        if (g_BCOSConfig.version() >= V2_3_0 && !checkAuthority(context, origin, sender))
+        {
+            PRECOMPILED_LOG(ERROR)
+                << LOG_BADGE("TableFactoryPrecompiled") << LOG_DESC("permission denied")
+                << LOG_KV("origin", origin.hex()) << LOG_KV("contract", sender.hex());
+            BOOST_THROW_EXCEPTION(PrecompiledException(
+                "Permission denied. " + origin.hex() + " can't call contract " + sender.hex()));
+        }
         string tableName;
         string keyField;
         string valueFiled;
-
         abi.abiOut(data, tableName, keyField, valueFiled);
+        PRECOMPILED_LOG(DEBUG) << LOG_BADGE("TableFactory") << LOG_KV("createTable", tableName)
+                               << LOG_KV("keyField", keyField) << LOG_KV("valueFiled", valueFiled);
         vector<string> fieldNameList;
         boost::split(fieldNameList, valueFiled, boost::is_any_of(","));
         boost::trim(keyField);
         if (keyField.size() > (size_t)SYS_TABLE_KEY_FIELD_NAME_MAX_LENGTH)
         {  // mysql TableName and fieldName length limit is 64
-            BOOST_THROW_EXCEPTION(StorageException(CODE_TABLE_FILED_LENGTH_OVERFLOW,
+            BOOST_THROW_EXCEPTION(StorageException(CODE_TABLE_FIELD_LENGTH_OVERFLOW,
                 std::string("table field name length overflow ") +
                     std::to_string(SYS_TABLE_KEY_FIELD_NAME_MAX_LENGTH)));
         }
@@ -179,7 +118,7 @@ bytes TableFactoryPrecompiled::call(
             boost::trim(str);
             if (str.size() > (size_t)SYS_TABLE_KEY_FIELD_NAME_MAX_LENGTH)
             {  // mysql TableName and fieldName length limit is 64
-                BOOST_THROW_EXCEPTION(StorageException(CODE_TABLE_FILED_LENGTH_OVERFLOW,
+                BOOST_THROW_EXCEPTION(StorageException(CODE_TABLE_FIELD_LENGTH_OVERFLOW,
                     std::string("table field name length overflow ") +
                         std::to_string(SYS_TABLE_KEY_FIELD_NAME_MAX_LENGTH)));
             }
@@ -190,7 +129,7 @@ bytes TableFactoryPrecompiled::call(
         valueFiled = boost::join(fieldNameList, ",");
         if (valueFiled.size() > (size_t)SYS_TABLE_VALUE_FIELD_MAX_LENGTH)
         {
-            BOOST_THROW_EXCEPTION(StorageException(CODE_TABLE_FILED_TOTALLENGTH_OVERFLOW,
+            BOOST_THROW_EXCEPTION(StorageException(CODE_TABLE_FIELD_TOTALLENGTH_OVERFLOW,
                 std::string("total table field name length overflow ") +
                     std::to_string(SYS_TABLE_VALUE_FIELD_MAX_LENGTH)));
         }
@@ -225,20 +164,24 @@ bytes TableFactoryPrecompiled::call(
                     result = 0;
                 }
             }
+            else
+            {
+                callResult->gasPricer()->appendOperation(InterfaceOpcode::CreateTable);
+            }
         }
         catch (dev::storage::StorageException& e)
         {
             STORAGE_LOG(ERROR) << "Create table failed: " << boost::diagnostic_information(e);
             result = e.errorCode();
         }
-        getErrorCodeOut(out, result);
+        getErrorCodeOut(callResult->mutableExecResult(), result);
     }
     else
     {
         STORAGE_LOG(ERROR) << LOG_BADGE("TableFactoryPrecompiled")
                            << LOG_DESC("call undefined function!");
     }
-    return out;
+    return callResult;
 }
 
 h256 TableFactoryPrecompiled::hash()

@@ -23,6 +23,8 @@
  */
 #pragma once
 #include <libblockchain/BlockChainInterface.h>
+#include <libledger/LedgerParamInterface.h>
+#include <libnetwork/Host.h>
 #include <libp2p/P2PMessageFactory.h>
 #include <libp2p/Service.h>
 #include <libtxpool/TxPool.h>
@@ -45,6 +47,9 @@ public:
     FakeService() : Service()
     {
         m_messageFactory = std::make_shared<dev::p2p::P2PMessageFactory>();
+        std::shared_ptr<dev::network::Host> host = std::make_shared<dev::network::Host>();
+        host->setThreadPool(std::make_shared<dev::ThreadPool>("host", 1));
+        setHost(host);
     }
     void setSessionInfos(dev::p2p::P2PSessionInfos& sessionInfos) { m_sessionInfos = sessionInfos; }
     void appendSessionInfo(P2PSessionInfo const& info) { m_sessionInfos.push_back(info); }
@@ -75,6 +80,19 @@ public:
         return msg->second;
     }
 
+    void clearMessageByNodeID(NodeID const& nodeID)
+    {
+        if (m_asyncSendMsgs.count(nodeID))
+        {
+            m_asyncSendMsgs.erase(nodeID);
+        }
+        m_asyncSend.erase(nodeID);
+    }
+
+    std::shared_ptr<dev::p2p::P2PSession> getP2PSessionByNodeId(NodeID const&) override
+    {
+        return std::make_shared<dev::p2p::P2PSession>();
+    }
     void setConnected() { m_connected = true; }
     bool isConnected(NodeID const&) const override { return m_connected; }
     std::shared_ptr<dev::p2p::P2PMessageFactory> p2pMessageFactory() override
@@ -111,11 +129,11 @@ public:
 class FakeBlockChain : public BlockChainInterface
 {
 public:
-    FakeBlockChain(uint64_t _blockNum, size_t const& transSize = 5,
-        Secret const& sec = KeyPair::create().secret())
+    FakeBlockChain(
+        uint64_t _blockNum, size_t const& transSize = 5, KeyPair const& keyPair = KeyPair::create())
       : m_blockNumber(_blockNum)
     {
-        m_sec = sec;
+        m_keyPair = keyPair;
         FakeTheBlockChain(_blockNum, transSize);
     }
 
@@ -127,7 +145,7 @@ public:
         m_blockHash.clear();
         for (uint64_t blockHeight = 0; blockHeight < _blockNum; blockHeight++)
         {
-            FakeBlock fake_block(trans_size, m_sec);
+            FakeBlock fake_block(trans_size, m_keyPair);
             if (blockHeight > 0)
             {
                 fake_block.m_block->header().setParentHash(
@@ -224,8 +242,8 @@ public:
         dev::h256 const& _txHash, dev::eth::LocalisedTransaction&) override
     {
         (void)_txHash;
-        return std::make_pair(std::make_shared<LocalisedTransactionReceipt>(
-                                  dev::executive::TransactionException::None),
+        return std::make_pair(
+            std::make_shared<LocalisedTransactionReceipt>(dev::eth::TransactionException::None),
             std::vector<std::pair<std::vector<std::string>, std::vector<std::string>>>());
     }
     CommitResult commitBlock(std::shared_ptr<dev::eth::Block> block,
@@ -242,7 +260,11 @@ public:
     }
 
     dev::bytes getCode(dev::Address) override { return bytes(); }
-    bool checkAndBuildGenesisBlock(GenesisBlockParam&, bool = true) override { return true; }
+    bool checkAndBuildGenesisBlock(
+        std::shared_ptr<dev::ledger::LedgerParamInterface>, bool = true) override
+    {
+        return true;
+    }
     std::string getSystemConfigByKey(std::string const&, int64_t) override { return "300000000"; };
     dev::h512s sealerList() override { return m_sealerList; }
     dev::h512s observerList() override { return m_observerList; }
@@ -253,7 +275,7 @@ public:
     std::vector<std::shared_ptr<Block>> m_blockChain;
     int64_t m_blockNumber;
     int64_t m_totalTransactionCount;
-    Secret m_sec;
+    KeyPair m_keyPair;
     dev::h512s m_sealerList = dev::h512s();
     dev::h512s m_observerList = dev::h512s();
 };

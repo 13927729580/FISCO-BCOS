@@ -24,9 +24,11 @@
 #include "Common.h"
 #include "DownloadingTxsQueue.h"
 #include "GossipBlockStatus.h"
+#include "NodeTimeMaintenance.h"
 #include "RspBlockReq.h"
 #include "SyncInterface.h"
 #include "SyncMsgEngine.h"
+#include "SyncMsgPacketFactory.h"
 #include "SyncStatus.h"
 #include "SyncTransaction.h"
 #include "SyncTreeTopology.h"
@@ -37,6 +39,7 @@
 #include <libdevcore/Worker.h>
 #include <libethcore/Common.h>
 #include <libethcore/Exceptions.h>
+#include <libflowlimit/RateLimiter.h>
 #include <libnetwork/Common.h>
 #include <libnetwork/Session.h>
 #include <libp2p/P2PInterface.h>
@@ -82,17 +85,13 @@ public:
         m_sendBlockProcessor =
             std::make_shared<dev::ThreadPool>("SyncSend-" + std::to_string(m_groupId), 1);
 
-        m_statisticHandler = m_service->statisticHandler();
         // syncStatus should be initialized firstly since it should be deconstruct at final
         m_syncStatus =
             std::make_shared<SyncMasterStatus>(_blockChain, _protocolId, _genesisHash, _nodeId);
-        // set statistic handler for downloadingBlockQueue and downloadingTxsQueue
-        m_syncStatus->setStatHandlerForDownloadingBlockQueue(m_statisticHandler);
 
         m_txQueue = std::make_shared<DownloadingTxsQueue>(_protocolId, _nodeId);
         m_txQueue->setService(_service);
         m_txQueue->setSyncStatus(m_syncStatus);
-        m_txQueue->setStatisticHandler(m_statisticHandler);
 
         if (m_enableSendTxsByTree)
         {
@@ -118,12 +117,34 @@ public:
         m_msgEngine = std::make_shared<SyncMsgEngine>(_service, _txPool, _blockChain, m_syncStatus,
             m_txQueue, _protocolId, _nodeId, _genesisHash);
         m_msgEngine->onNotifyWorker([&]() { m_signalled.notify_all(); });
-        m_msgEngine->setStatisticHandler(m_statisticHandler);
 
         m_syncTrans = std::make_shared<SyncTransaction>(_service, _txPool, m_txQueue, _protocolId,
             _nodeId, m_syncStatus, m_msgEngine, _blockChain, _idleWaitMs);
-        m_syncTrans->setStatisticHandler(m_statisticHandler);
     }
+
+    virtual void setMaxBlockQueueSize(int64_t const& _maxBlockQueueSize)
+    {
+        m_syncStatus->bq().setMaxBlockQueueSize(_maxBlockQueueSize);
+    }
+
+    virtual void setTxsStatusGossipMaxPeers(unsigned const& _txsStatusGossipMaxPeers)
+    {
+        m_syncTrans->setTxsStatusGossipMaxPeers(_txsStatusGossipMaxPeers);
+    }
+
+    void setSyncMsgPacketFactory(SyncMsgPacketFactory::Ptr _syncMsgPacketFactory)
+    {
+        m_syncMsgPacketFactory = _syncMsgPacketFactory;
+        m_msgEngine->setSyncMsgPacketFactory(_syncMsgPacketFactory);
+    }
+
+    void setNodeTimeMaintenance(NodeTimeMaintenance::Ptr _nodeTimeMaintenance)
+    {
+        m_msgEngine->setNodeTimeMaintenance(_nodeTimeMaintenance);
+        m_nodeTimeMaintenance = _nodeTimeMaintenance;
+    }
+
+    NodeTimeMaintenance::Ptr nodeTimeMaintenance() { return m_nodeTimeMaintenance; }
 
     virtual ~SyncMaster() { stop(); };
     /// start blockSync
@@ -230,6 +251,16 @@ public:
         m_syncTrans->noteForwardRemainTxs(_targetNodeId);
     }
 
+    void setBandwidthLimiter(dev::flowlimit::RateLimiter::Ptr _bandwidthLimiter)
+    {
+        m_bandwidthLimiter = _bandwidthLimiter;
+    }
+
+    void setNodeBandwidthLimiter(dev::flowlimit::RateLimiter::Ptr _nodeBandwidthLimiter)
+    {
+        m_nodeBandwidthLimiter = _nodeBandwidthLimiter;
+    }
+
 private:
     // init via blockchain when the sync thread started
     void updateNodeInfo()
@@ -241,6 +272,10 @@ private:
         std::sort(nodeList.begin(), nodeList.end());
         updateConsensusNodeInfo(sealerList, nodeList);
     }
+
+protected:
+    // factory used to create sync related packet
+    SyncMsgPacketFactory::Ptr m_syncMsgPacketFactory;
 
 private:
     /// p2p service handler
@@ -280,12 +315,12 @@ private:
 
     // Internal coding variable
     /// mutex to access m_signalled
-    Mutex x_signalled;
+    boost::mutex x_signalled;
     /// mutex to protect m_currentSealingNumber
     mutable SharedMutex x_currentSealingNumber;
 
     /// signal to notify all thread to work
-    std::condition_variable m_signalled;
+    boost::condition_variable m_signalled;
 
     // sync state
     std::atomic_bool m_newBlocks = {false};
@@ -295,9 +330,6 @@ private:
 
     // sync transactions
     SyncTransaction::Ptr m_syncTrans = nullptr;
-
-    // statisticHandler
-    dev::p2p::StatisticHandler::Ptr m_statisticHandler = nullptr;
 
     // handler for find the tree router
     SyncTreeTopology::Ptr m_syncTreeRouter = nullptr;
@@ -310,6 +342,10 @@ private:
 
     // verify handler to check downloading block
     std::function<bool(dev::eth::Block const&)> fp_isConsensusOk = nullptr;
+
+    dev::flowlimit::RateLimiter::Ptr m_bandwidthLimiter;
+    dev::flowlimit::RateLimiter::Ptr m_nodeBandwidthLimiter;
+    NodeTimeMaintenance::Ptr m_nodeTimeMaintenance;
 
 public:
     void maintainBlocks();

@@ -23,6 +23,7 @@
  */
 #include "DBInitializer.h"
 #include "LedgerParam.h"
+#include "libdevcrypto/CryptoInterface.h"
 #include "libstorage/BinLogHandler.h"
 #include "libstorage/BinaryLogStorage.h"
 #include "libstorage/RocksDBStorageFactory.h"
@@ -35,9 +36,9 @@
 #include <libdevcore/Common.h>
 #include <libdevcore/Exceptions.h>
 #include <libmptstate/MPTStateFactory.h>
+#include <libprecompiled/Precompiled.h>
 #include <libsecurity/EncryptedLevelDB.h>
 #include <libstorage/BasicRocksDB.h>
-#include <libstorage/CachedStorage.h>
 #include <libstorage/LevelDBStorage.h>
 #include <libstorage/MemoryTableFactoryFactory.h>
 #include <libstorage/MemoryTableFactoryFactory2.h>
@@ -67,8 +68,22 @@ void DBInitializer::initStorageDB()
     }
     else if (!dev::stringCmpIgnoreCase(m_param->mutableStorageParam().type, "External"))
     {
-        auto storage = initSQLStorage();
-        initTableFactory2(storage, m_param);
+        // only support external when "supported_version < 2.3.0"
+        if (g_BCOSConfig.version() < V2_3_0)
+        {
+            auto storage = initSQLStorage();
+            initTableFactory2(storage, m_param);
+        }
+        else
+        {
+            DBInitializer_LOG(ERROR)
+                << LOG_DESC("Only support external when supported_version is lower than 2.3.0")
+                << LOG_KV("storage_type", m_param->mutableStorageParam().type)
+                << LOG_KV("supported_version", g_BCOSConfig.version());
+            BOOST_THROW_EXCEPTION(
+                UnsupportedFeature() << errinfo_comment(
+                    "Only support external when supported_version is lower than 2.3.0"));
+        }
     }
     else if (!dev::stringCmpIgnoreCase(m_param->mutableStorageParam().type, "MySQL"))
     {
@@ -84,6 +99,9 @@ void DBInitializer::initStorageDB()
     {
         auto storage = initScalableStorage(m_param);
         initTableFactory2(storage, m_param);
+        // reset block number after recover from binlog
+        std::string blocksDBPath = m_param->mutableStorageParam().path + "/blocksDB";
+        setRemoteBlockNumber(std::dynamic_pointer_cast<ScalableStorage>(storage), blocksDBPath);
     }
     else
     {
@@ -216,6 +234,16 @@ void DBInitializer::recoverFromBinaryLog(
     }
 }
 
+void DBInitializer::setSyncNumForCachedStorage(int64_t const& _syncNum)
+{
+    if (m_cacheStorage)
+    {
+        m_cacheStorage->setSyncNum(_syncNum);
+        DBInitializer_LOG(INFO) << LOG_BADGE("setSyncNumForCachedStorage")
+                                << LOG_KV("syncNum", _syncNum);
+    }
+}
+
 void DBInitializer::initTableFactory2(
     Storage::Ptr _backend, std::shared_ptr<LedgerParamInterface> _param)
 {
@@ -229,6 +257,7 @@ void DBInitializer::initTableFactory2(
         cachedStorage->setMaxForwardBlock(_param->mutableStorageParam().maxForwardBlock);
         cachedStorage->init();
         backendStorage = cachedStorage;
+        m_cacheStorage = cachedStorage;
         DBInitializer_LOG(INFO) << LOG_BADGE("init CachedStorage")
                                 << LOG_KV("maxCapacity", _param->mutableStorageParam().maxCapacity)
                                 << LOG_KV("maxForwardBlock",
@@ -247,7 +276,15 @@ void DBInitializer::initTableFactory2(
         boost::filesystem::create_directories(path);
         auto binaryLogger = make_shared<BinLogHandler>(path);
         binaryLogger->setBinaryLogSize(g_BCOSConfig.c_binaryLogSize);
+        if (m_cacheStorage)
+        {  // turn off cachedStorage ForwardBlock when recover from binlog
+            m_cacheStorage->setMaxForwardBlock(0);
+        }
         recoverFromBinaryLog(binaryLogger, backendStorage);
+        if (m_cacheStorage)
+        {
+            m_cacheStorage->setMaxForwardBlock(_param->mutableStorageParam().maxForwardBlock);
+        }
         binaryLogStorage->setBinaryLogger(binaryLogger);
         DBInitializer_LOG(INFO) << LOG_BADGE("init BinaryLogger") << LOG_KV("BinaryLogsPath", path);
         m_storage = binaryLogStorage;
@@ -275,39 +312,6 @@ dev::storage::Storage::Ptr DBInitializer::initSQLStorage()
     return sqlStorage;
 }
 
-std::function<void(std::string const&, std::string&)> dev::ledger::getEncryptHandler()
-{
-    // get dataKey according to ciperDataKey from keyCenter
-    return [=](std::string const& data, std::string& encData) {
-        try
-        {
-            encData = aesCBCEncrypt(data, g_BCOSConfig.diskEncryption.dataKey);
-        }
-        catch (const std::exception& e)
-        {
-            std::string error_info = "encryt value for data=" + data +
-                                     " failed, EINFO: " + boost::diagnostic_information(e);
-            ROCKSDB_LOG(ERROR) << LOG_DESC(error_info);
-            BOOST_THROW_EXCEPTION(EncryptFailed() << errinfo_comment(error_info));
-        }
-    };
-}
-
-std::function<void(std::string&)> dev::ledger::getDecryptHandler()
-{
-    return [=](std::string& data) {
-        try
-        {
-            data = aesCBCDecrypt(data, g_BCOSConfig.diskEncryption.dataKey);
-        }
-        catch (const std::exception& e)
-        {
-            std::string error_info = "decrypt value for data=" + data + " failed";
-            ROCKSDB_LOG(ERROR) << LOG_DESC(error_info);
-            BOOST_THROW_EXCEPTION(DecryptFailed() << errinfo_comment(error_info));
-        }
-    };
-}
 
 dev::storage::Storage::Ptr DBInitializer::initRocksDBStorage(
     std::shared_ptr<LedgerParamInterface> _param)
@@ -320,7 +324,7 @@ dev::storage::Storage::Ptr DBInitializer::initRocksDBStorage(
     try
     {
         auto rocksdbStorage = createRocksDBStorage(_param->mutableStorageParam().path,
-            g_BCOSConfig.diskEncryption.enable, _param->mutableStorageParam().binaryLog,
+            asBytes(g_BCOSConfig.diskEncryption.dataKey), _param->mutableStorageParam().binaryLog,
             _param->mutableStorageParam().CachedStorage);
         return rocksdbStorage;
     }
@@ -346,7 +350,7 @@ dev::storage::Storage::Ptr DBInitializer::initScalableStorage(
     try
     {
         auto stateStorage = createRocksDBStorage(_param->mutableStorageParam().path + "/state",
-            g_BCOSConfig.diskEncryption.enable, _param->mutableStorageParam().binaryLog,
+            asBytes(g_BCOSConfig.diskEncryption.dataKey), _param->mutableStorageParam().binaryLog,
             _param->mutableStorageParam().CachedStorage);
         auto scalableStorage =
             std::make_shared<ScalableStorage>(_param->mutableStorageParam().scrollThreshold);
@@ -369,7 +373,6 @@ dev::storage::Storage::Ptr DBInitializer::initScalableStorage(
         blockNumber = blockNumber > 0 ? blockNumber + 1 : 0;
         auto archiveStorage = rocksDBStorageFactory->getStorage(to_string(blockNumber));
         scalableStorage->setArchiveStorage(archiveStorage, blockNumber);
-        setRemoteBlockNumber(scalableStorage, blocksDBPath);
 
         return scalableStorage;
     }
@@ -446,6 +449,10 @@ dev::storage::Storage::Ptr DBInitializer::initZdbStorage()
         DBInitializer_LOG(ERROR) << LOG_BADGE("STORAGE") << LOG_BADGE("MySQL")
                                  << "access mysql failed exit:" << e.what();
         raise(SIGTERM);
+        while (!g_BCOSConfig.shouldExit.load())
+        {  // wait to exit
+            std::this_thread::yield();
+        }
         BOOST_THROW_EXCEPTION(e);
     });
     return zdbStorage;
@@ -468,6 +475,16 @@ void DBInitializer::createExecutiveContext()
     // mpt or storage
     m_executiveContextFactory->setStateFactory(m_stateFactory);
     m_executiveContextFactory->setTableFactoryFactory(m_tableFactoryFactory);
+    // create precompiled related factory
+    auto precompiledResultFactory =
+        std::make_shared<dev::precompiled::PrecompiledExecResultFactory>();
+    auto precompiledGasFactory = std::make_shared<dev::precompiled::PrecompiledGasFactory>(
+        m_param->mutableGenesisParam().evmFlags);
+    precompiledResultFactory->setPrecompiledGasFactory(precompiledGasFactory);
+    m_executiveContextFactory->setPrecompiledExecResultFactory(precompiledResultFactory);
+    DBInitializer_LOG(INFO) << LOG_DESC(
+        "create precompiledGasFactory and precompiledResultFactory");
+
     DBInitializer_LOG(INFO) << LOG_DESC("createExecutiveContext SUCC");
 }
 
@@ -477,12 +494,17 @@ void DBInitializer::createStateFactory(dev::h256 const& genesisHash)
     DBInitializer_LOG(INFO) << LOG_BADGE("createStateFactory")
                             << LOG_KV("type", m_param->mutableStateParam().type);
     if (dev::stringCmpIgnoreCase(m_param->mutableStateParam().type, "mpt") == 0)
-        createMptState(genesisHash);
-    else if (dev::stringCmpIgnoreCase(m_param->mutableStateParam().type, "storage") ==
-             0)  /// default is storage state
-        createStorageState();
-    else
     {
+        m_stateFactory = std::make_shared<MPTStateFactory>(
+            u256(0x0), m_param->baseDir(), genesisHash, WithExisting::Trust);
+        DBInitializer_LOG(INFO) << LOG_DESC("create MptState success");
+    }
+    else if (dev::stringCmpIgnoreCase(m_param->mutableStateParam().type, "storage") == 0)
+    {
+        createStorageState();
+    }
+    else
+    {  // default is storage state
         DBInitializer_LOG(WARNING)
             << LOG_BADGE("createStateFactory")
             << LOG_DESC("only support storage and mpt now, create storage by default");
@@ -494,20 +516,13 @@ void DBInitializer::createStateFactory(dev::h256 const& genesisHash)
 /// TOCHECK: create the stateStorage with AMDB
 void DBInitializer::createStorageState()
 {
-    m_stateFactory = std::make_shared<StorageStateFactory>(u256(0x0));
+    auto stateFactory = std::make_shared<StorageStateFactory>(u256(0x0));
+    m_stateFactory = stateFactory;
     DBInitializer_LOG(INFO) << LOG_DESC("createStorageState SUCC");
 }
 
-/// create the mptState
-void DBInitializer::createMptState(dev::h256 const& genesisHash)
-{
-    m_stateFactory = std::make_shared<MPTStateFactory>(
-        u256(0x0), m_param->baseDir(), genesisHash, WithExisting::Trust);
-    DBInitializer_LOG(INFO) << LOG_DESC("createMptState SUCC");
-}
-
-Storage::Ptr dev::ledger::createRocksDBStorage(const std::string& _dbPath,
-    bool _enableEncryption = false, bool _disableWAL = false, bool _enableCache = true)
+Storage::Ptr dev::ledger::createRocksDBStorage(const std::string& _dbPath, const bytes& _encryptKey,
+    bool _disableWAL = false, bool _enableCache = true)
 {
     boost::filesystem::create_directories(_dbPath);
 
@@ -515,12 +530,21 @@ Storage::Ptr dev::ledger::createRocksDBStorage(const std::string& _dbPath,
     auto options = getRocksDBOptions();
     // any exception will cause the program to be stopped
     rocksDB->Open(options, _dbPath);
-    if (_enableEncryption)
+    if (!_encryptKey.empty())
     {
+        bool enableCompress = true;
+        if (g_BCOSConfig.version() < V2_7_0)
+        {
+            enableCompress = false;
+        }
+        DBInitializer_LOG(INFO)
+            << LOG_DESC("rocksDB is empty, set compress property for disk encryption")
+            << LOG_KV("enableCompress", enableCompress);
+        // if enable disk encryption, this will not empty
         DBInitializer_LOG(INFO) << LOG_DESC(
             "diskEncryption enabled: set encrypt and decrypt handler for rocksDB");
-        rocksDB->setEncryptHandler(getEncryptHandler());
-        rocksDB->setDecryptHandler(getDecryptHandler());
+        rocksDB->setEncryptHandler(getEncryptHandler(_encryptKey, enableCompress));
+        rocksDB->setDecryptHandler(getDecryptHandler(_encryptKey, enableCompress));
     }
     // create and init rocksDBStorage
     std::shared_ptr<RocksDBStorage> rocksdbStorage =
@@ -562,5 +586,7 @@ dev::storage::Storage::Ptr dev::ledger::createZdbStorage(
     zdbStorage->setConnPool(sqlconnpool);
 
     zdbStorage->setFatalHandler(_fatalHandler);
+    zdbStorage->setMaxRetry(_param->mutableStorageParam().maxRetry);
+
     return zdbStorage;
 }

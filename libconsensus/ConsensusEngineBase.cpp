@@ -93,6 +93,13 @@ void ConsensusEngineBase::checkBlockValid(Block const& block)
                           << LOG_KV("utcTime", utcTime()) << LOG_KV("hash", block_hash.abridged());
         BOOST_THROW_EXCEPTION(DisabledFutureTime() << errinfo_comment("Future time Disabled"));
     }
+    // check block timestamp: only enabled after v2.6.0
+    // don't check timestamp of the genesis block
+    if (block.blockHeader().number() >= 1)
+    {
+        checkBlockTimeStamp(block);
+    }
+
     /// check the block number
     if (block.blockHeader().number() <= m_blockChain->number())
     {
@@ -128,17 +135,36 @@ void ConsensusEngineBase::checkBlockValid(Block const& block)
     }
 }
 
+void ConsensusEngineBase::checkBlockTimeStamp(dev::eth::Block const& _block)
+{
+    if (!m_nodeTimeMaintenance)
+    {
+        return;
+    }
+    int64_t blockTimeStamp = _block.blockHeader().timestamp();
+    auto alignedTime = getAlignedTime();
+    // the blockTime must be within 30min of the current time
+    if (std::abs(blockTimeStamp - alignedTime) > m_maxBlockTimeOffset)
+    {
+        // The block time is too different from the current time
+        ENGINE_LOG(WARNING)
+            << LOG_DESC("checkBlockTimeStamp: the block time is too different from the local time")
+            << LOG_KV("blockTime", blockTimeStamp) << LOG_KV("alignedTime", alignedTime)
+            << LOG_KV("utcTime", utcTime()) << LOG_KV("blkNum", _block.blockHeader().number())
+            << LOG_KV("hash", _block.blockHeader().hash().abridged());
+    }
+}
+
 void ConsensusEngineBase::updateConsensusNodeList()
 {
     try
     {
         std::stringstream s2;
         s2 << "[updateConsensusNodeList] Sealers:";
+        /// to make sure the index of all sealers are consistent
+        auto sealerList = m_blockChain->sealerList();
+        std::sort(sealerList.begin(), sealerList.end());
         {
-            /// to make sure the index of all sealers are consistent
-            auto sealerList = m_blockChain->sealerList();
-            std::sort(sealerList.begin(), sealerList.end());
-
             UpgradableGuard l(m_sealerListMutex);
             if (sealerList != m_sealerList)
             {
@@ -166,7 +192,6 @@ void ConsensusEngineBase::updateConsensusNodeList()
                               << s2.str();
 
             // get all nodes
-            auto sealerList = m_blockChain->sealerList();
             dev::h512s nodeList = sealerList + observerList;
             std::sort(nodeList.begin(), nodeList.end());
             if (m_blockSync->syncTreeRouterEnabled())
@@ -230,6 +255,40 @@ void ConsensusEngineBase::resetConfig()
     m_f = (m_nodeNum - 1) / 3;
     m_cfgErr = (node_idx == MAXIDX);
     m_idx = node_idx;
+}
+
+void ConsensusEngineBase::reportBlock(dev::eth::Block const& _block)
+{
+    if (!g_BCOSConfig.enableStat())
+    {
+        return;
+    }
+    // print the block gasUsed
+    auto txsNum = _block.transactions()->size();
+    if (txsNum == 0)
+    {
+        return;
+    }
+    auto blockGasUsed = (*_block.transactionReceipts())[txsNum - 1]->gasUsed();
+    STAT_LOG(INFO) << LOG_TYPE("BlockGasUsed") << LOG_KV("g", m_groupId) << LOG_KV("txNum", txsNum)
+                   << LOG_KV("gasUsed", blockGasUsed)
+                   << LOG_KV("blockNumber", _block.blockHeader().number())
+                   << LOG_KV("sealerIdx", _block.blockHeader().sealer())
+                   << LOG_KV("blockHash", toHex(_block.blockHeader().hash()))
+                   << LOG_KV("nodeID", toHex(m_keyPair.pub()));
+    // print the gasUsed for each transaction
+    u256 prevGasUsed = 0;
+    uint64_t receiptIndex = 0;
+    auto receipts = _block.transactionReceipts();
+    for (auto const& tx : *_block.transactions())
+    {
+        auto receipt = (*receipts)[receiptIndex];
+        auto gasUsed = receipt->gasUsed() - prevGasUsed;
+        STAT_LOG(INFO) << LOG_TYPE("TxsGasUsed") << LOG_KV("g", m_groupId)
+                       << LOG_KV("txHash", toHex(tx->hash())) << LOG_KV("gasUsed", gasUsed);
+        prevGasUsed = receipt->gasUsed();
+        receiptIndex++;
+    }
 }
 
 }  // namespace consensus

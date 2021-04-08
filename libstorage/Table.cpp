@@ -29,6 +29,7 @@
 
 #include "Common.h"
 #include "Table.h"
+#include "libconfig/GlobalConfigure.h"
 #include <libdevcore/Common.h>
 #include <tbb/pipeline.h>
 #include <tbb/tbb_thread.h>
@@ -107,25 +108,50 @@ std::string Entry::getField(const std::string& key) const
     return "";
 }
 
-void Entry::setField(const std::string& key, const std::string& value)
+bool Entry::fieldExist(std::string const& _key) const
 {
-    auto lock = checkRef();
+    return m_data->m_fields.count(_key);
+}
+
+vector<byte> Entry::getFieldBytes(const std::string& key) const
+{
+    RWMutexScoped lock(m_data->m_mutex, false);
 
     auto it = m_data->m_fields.find(key);
 
     if (it != m_data->m_fields.end())
     {
-        m_capacity -= (key.size() + it->second.size());
+        return vector<byte>((unsigned char*)it->second.data(),
+            (unsigned char*)(it->second.data() + it->second.size()));
+    }
+
+    STORAGE_LOG(ERROR) << LOG_BADGE("Entry") << LOG_DESC("can't find key") << LOG_KV("key", key);
+    return vector<byte>();
+}
+
+void Entry::setField(const std::string& key, const std::string& value)
+{
+    auto lock = checkRef();
+
+    auto it = m_data->m_fields.find(key);
+    ssize_t updatedCapacity = 0;
+    if (it != m_data->m_fields.end())
+    {
+        updatedCapacity = value.size() - it->second.size();
         it->second = value;
-        m_capacity += (key.size() + value.size());
     }
     else
     {
         m_data->m_fields.insert(std::make_pair(key, value));
-        m_capacity += (key.size() + value.size());
+        updatedCapacity = key.size() + value.size();
     }
-
+    m_capacity += updatedCapacity;
+    if (isHashField(key))
+    {
+        m_capacityOfHashField += updatedCapacity;
+    }
     assert(m_capacity >= 0);
+    assert(m_capacityOfHashField >= 0);
     m_dirty = true;
 }
 
@@ -134,21 +160,24 @@ void Entry::setField(const std::string& key, const byte* value, size_t size)
     auto lock = checkRef();
 
     auto it = m_data->m_fields.find(key);
-
+    ssize_t updatedCapacity = 0;
     if (it != m_data->m_fields.end())
     {
-        m_capacity -= (key.size() + it->second.size());
+        updatedCapacity = size - it->second.size();
         it->second.assign((char*)value, (char*)value + size);
-        m_capacity += (key.size() + size);
     }
     else
     {
         m_data->m_fields.emplace(key, std::string((char*)value, size));
-        // m_data->m_fields.insert(std::make_pair(key, std::string(value, size)));
-        m_capacity += (key.size() + size);
+        updatedCapacity = key.size() + size;
     }
-
+    m_capacity += updatedCapacity;
+    if (isHashField(key))
+    {
+        m_capacityOfHashField += updatedCapacity;
+    }
     assert(m_capacity >= 0);
+    assert(m_capacityOfHashField >= 0);
     m_dirty = true;
 }
 
@@ -294,9 +323,15 @@ void Entry::setDeleted(bool deleted)
 }
 
 ssize_t Entry::capacity() const
-{
+{  // the capacity is used to calculate gas, must return the same value in different DB
     RWMutexScoped lock(m_data->m_mutex, false);
     return m_capacity;
+}
+
+ssize_t Entry::capacityOfHashField() const
+{
+    RWMutexScoped lock(m_data->m_mutex, false);
+    return m_capacityOfHashField;
 }
 
 void Entry::copyFrom(Entry::ConstPtr entry)
@@ -332,6 +367,7 @@ void Entry::copyFrom(Entry::ConstPtr entry)
     m_force = entry->m_force;
     m_deleted = entry->m_deleted;
     m_capacity = entry->m_capacity;
+    m_capacityOfHashField = entry->m_capacityOfHashField;
 
     auto oldData = m_data;
     m_data->m_refCount -= 1;
@@ -710,14 +746,27 @@ bool Condition::process(Entry::Ptr entry)
                         it.second.right.first)
                     {
                         if (it.second.left.second == fieldIt->second)
-                        {
-                            // point hited
+                        {  // EQ
                             continue;
                         }
                         else
                         {
-                            // point missed
                             return false;
+                        }
+                    }
+                    if (g_BCOSConfig.version() >= V2_3_0)
+                    {
+                        if (it.second.left.second == it.second.right.second &&
+                            !it.second.left.first && !it.second.right.first)
+                        {
+                            if (it.second.left.second != fieldIt->second)
+                            {  // NE
+                                continue;
+                            }
+                            else
+                            {
+                                return false;
+                            }
                         }
                     }
 
@@ -731,14 +780,14 @@ bool Condition::process(Entry::Ptr entry)
                         }
 
                         if (it.second.left.first)
-                        {
+                        {  // GE, rhs should greater equal lhs
                             if (!(lhs <= rhs))
                             {
                                 return false;
                             }
                         }
                         else
-                        {
+                        {  // GT
                             if (!(lhs < rhs))
                             {
                                 return false;
@@ -758,12 +807,12 @@ bool Condition::process(Entry::Ptr entry)
                         if (it.second.right.first)
                         {
                             if (!(lhs >= rhs))
-                            {
+                            {  // LE
                                 return false;
                             }
                         }
                         else
-                        {
+                        {  // LT, rhs should less than lhs
                             if (!(lhs > rhs))
                             {
                                 return false;
@@ -843,6 +892,13 @@ TableInfo::Ptr dev::storage::getSysTableInfo(const string& tableName)
     {
         tableInfo->key = "hash";
         tableInfo->fields = vector<string>{"value"};
+        tableInfo->enableConsensus = false;
+    }
+    // SYS_HASH_2_BLOCKHEADER won't change the state
+    else if (tableName == SYS_HASH_2_BLOCKHEADER)
+    {
+        tableInfo->key = "hash";
+        tableInfo->fields = std::vector<string>{SYS_VALUE, SYS_SIG_LIST};
         tableInfo->enableConsensus = false;
     }
     else if (tableName == SYS_CNS)

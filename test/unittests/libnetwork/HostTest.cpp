@@ -26,6 +26,7 @@
 #include "libp2p/P2PMessageFactory.h"
 #include "test/tools/libutils/Common.h"
 #include <libinitializer/SecureInitializer.h>
+#include <test/tools/libutils/TestOutputHelper.h>
 #include <boost/property_tree/ini_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/test/unit_test.hpp>
@@ -34,6 +35,7 @@ using namespace dev;
 using namespace std;
 using namespace dev::network;
 using namespace dev::p2p;
+using namespace dev::test;
 using namespace dev::test;
 
 namespace test_Host
@@ -44,14 +46,17 @@ struct HostFixture
     {
         boost::property_tree::ptree pt;
         pt.put("secure.data_path", getTestPath().string() + "/fisco-bcos-data/");
-#ifdef FISCO_GM
-        m_sslContext =
-            std::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tlsv12);
-#else
-        auto secureInitializer = std::make_shared<dev::initializer::SecureInitializer>();
-        secureInitializer->initConfig(pt);
-        m_sslContext = secureInitializer->SSLContext();
-#endif
+        if (g_BCOSConfig.SMCrypto())
+        {
+            m_sslContext =
+                std::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tlsv12);
+        }
+        else
+        {
+            auto secureInitializer = std::make_shared<dev::initializer::SecureInitializer>();
+            secureInitializer->initConfig(pt);
+            m_sslContext = secureInitializer->SSLContext();
+        }
         m_asioInterface = std::make_shared<dev::network::FakeASIOInterface>();
         m_asioInterface->setIOService(std::make_shared<ba::io_service>());
         m_asioInterface->setSSLContext(m_sslContext);
@@ -77,7 +82,7 @@ struct HostFixture
                     LOG(ERROR) << e.what();
                     return;
                 }
-                LOG(INFO) << "start new session " << p->socket()->nodeIPEndpoint().name()
+                LOG(INFO) << "start new session " << p->socket()->nodeIPEndpoint()
                           << ",error:" << e.what();
                 m_sessions.push_back(p);
                 p->start();
@@ -98,6 +103,11 @@ struct HostFixture
     std::vector<std::shared_ptr<dev::network::SessionFace>> m_sessions;
     std::function<void(NetworkException, NodeInfo const&, std::shared_ptr<SessionFace>)>
         m_connectionHandler;
+};
+
+struct SM_HostFixture : public SM_CryptoTestFixture, public HostFixture
+{
+    SM_HostFixture() : SM_CryptoTestFixture(), HostFixture() {}
 };
 
 BOOST_FIXTURE_TEST_SUITE(Host, HostFixture)
@@ -133,7 +143,6 @@ BOOST_AUTO_TEST_CASE(Hostfunctions)
 
 BOOST_AUTO_TEST_CASE(Host_run)
 {
-#ifndef FISCO_GM
     m_host->start();
     // start() will create a new thread and call host->startAccept, so wait
     this_thread::sleep_for(chrono::milliseconds(50));
@@ -145,6 +154,7 @@ BOOST_AUTO_TEST_CASE(Host_run)
     auto socket = fakeAsioInterface->m_acceptorInfo.first;
     auto nodeIP = NodeIPEndpoint(boost::asio::ip::address::from_string("127.0.0.1"), 8888);
     socket->setNodeIPEndpoint(nodeIP);
+    // TODO: fix the ut
     BOOST_CHECK(true == m_sessions.empty());
     boost::system::error_code ec;
     // accept successfully
@@ -204,11 +214,44 @@ BOOST_AUTO_TEST_CASE(Host_run)
         [](NetworkException, SessionFace::Ptr, Message::Ptr m) { LOG(INFO) << m->length(); });
     s->setMessageHandler(messageHandler);
     // empty callback
+    // TODO: fix this ut
     BOOST_CHECK(nullptr == s->getCallbackBySeq(0u));
 
     m_host->stop();
-#endif
 }
+BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_FIXTURE_TEST_SUITE(SM_Host, SM_HostFixture)
+
+BOOST_AUTO_TEST_CASE(ASIOInterface)
+{
+    m_asioInterface->ioService();
+    m_asioInterface->sslContext();
+    m_asioInterface->sslContext();
+    m_asioInterface->newTimer(0);
+    m_asioInterface->reset();
+    m_asioInterface->stop();
+    m_asioInterface->ASIOInterface::newSocket();
+}
+
+BOOST_AUTO_TEST_CASE(Hostfunctions)
+{
+    BOOST_CHECK(m_port == m_host->listenPort());
+    BOOST_CHECK(m_hostIP == m_host->listenHost());
+    string hostIP = "0.0.0.0";
+    uint16_t port = 8546;
+    m_host->setHostPort(hostIP, port);
+    BOOST_CHECK(port == m_host->listenPort());
+    BOOST_CHECK(hostIP == m_host->listenHost());
+    BOOST_CHECK(false == m_host->haveNetwork());
+    BOOST_CHECK(m_certBlacklist == m_host->certBlacklist());
+    m_host->connectionHandler();
+    BOOST_CHECK(m_asioInterface == m_host->asioInterface());
+    BOOST_CHECK(m_sessionFactory == m_host->sessionFactory());
+    BOOST_CHECK(m_messageFactory == m_host->messageFactory());
+    BOOST_CHECK(m_threadPool == m_host->threadPool());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 }  // namespace test_Host

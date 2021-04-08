@@ -1,7 +1,6 @@
 
 file(GLOB HEADERS "*.h")
 set(USER_PRECOMPILED_HEADER "")
-
 foreach(header ${HEADERS})
     string (REPLACE "${CMAKE_SOURCE_DIR}/" "" header "${header}")
     list(APPEND USER_PRECOMPILED_HEADER "#include <${header}>")

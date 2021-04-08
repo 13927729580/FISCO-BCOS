@@ -22,6 +22,7 @@
 
 #include "ModularServer.h"
 #include <boost/lexical_cast.hpp>
+#include <set>
 
 using namespace jsonrpc;
 
@@ -47,6 +48,12 @@ public:
         this->bindAndAddMethod(jsonrpc::Procedure("getSealerList", jsonrpc::PARAMS_BY_POSITION,
                                    jsonrpc::JSON_STRING, "param1", jsonrpc::JSON_INTEGER, NULL),
             &dev::rpc::RpcFace::getSealerListI);
+
+        this->bindAndAddMethod(
+            jsonrpc::Procedure("getEpochSealersList", jsonrpc::PARAMS_BY_POSITION,
+                jsonrpc::JSON_STRING, "param1", jsonrpc::JSON_INTEGER, NULL),
+            &dev::rpc::RpcFace::getEpochSealersListI);
+
         this->bindAndAddMethod(jsonrpc::Procedure("getObserverList", jsonrpc::PARAMS_BY_POSITION,
                                    jsonrpc::JSON_STRING, "param1", jsonrpc::JSON_INTEGER, NULL),
             &dev::rpc::RpcFace::getObserverListI);
@@ -61,6 +68,9 @@ public:
         this->bindAndAddMethod(jsonrpc::Procedure("getClientVersion", jsonrpc::PARAMS_BY_POSITION,
                                    jsonrpc::JSON_OBJECT, NULL),
             &dev::rpc::RpcFace::getClientVersionI);
+        this->bindAndAddMethod(jsonrpc::Procedure("getNodeInfo", jsonrpc::PARAMS_BY_POSITION,
+                                   jsonrpc::JSON_OBJECT, NULL),
+            &dev::rpc::RpcFace::getNodeInfoI);
         this->bindAndAddMethod(jsonrpc::Procedure("getPeers", jsonrpc::PARAMS_BY_POSITION,
                                    jsonrpc::JSON_OBJECT, "param1", jsonrpc::JSON_INTEGER, NULL),
             &dev::rpc::RpcFace::getPeersI);
@@ -78,10 +88,24 @@ public:
                                    jsonrpc::JSON_OBJECT, "param1", jsonrpc::JSON_INTEGER, "param2",
                                    jsonrpc::JSON_STRING, "param3", jsonrpc::JSON_BOOLEAN, NULL),
             &dev::rpc::RpcFace::getBlockByHashI);
+
+        this->bindAndAddMethod(
+            jsonrpc::Procedure("getBlockHeaderByHash", jsonrpc::PARAMS_BY_POSITION,
+                jsonrpc::JSON_OBJECT, "param1", jsonrpc::JSON_INTEGER, "param2",
+                jsonrpc::JSON_STRING, "param3", jsonrpc::JSON_BOOLEAN, NULL),
+            &dev::rpc::RpcFace::getBlockHeaderByHashI);
+
         this->bindAndAddMethod(jsonrpc::Procedure("getBlockByNumber", jsonrpc::PARAMS_BY_POSITION,
                                    jsonrpc::JSON_OBJECT, "param1", jsonrpc::JSON_INTEGER, "param2",
                                    jsonrpc::JSON_STRING, "param3", jsonrpc::JSON_BOOLEAN, NULL),
             &dev::rpc::RpcFace::getBlockByNumberI);
+
+        this->bindAndAddMethod(
+            jsonrpc::Procedure("getBlockHeaderByNumber", jsonrpc::PARAMS_BY_POSITION,
+                jsonrpc::JSON_OBJECT, "param1", jsonrpc::JSON_INTEGER, "param2",
+                jsonrpc::JSON_STRING, "param3", jsonrpc::JSON_BOOLEAN, NULL),
+            &dev::rpc::RpcFace::getBlockHeaderByNumberI);
+
         this->bindAndAddMethod(jsonrpc::Procedure("getBlockHashByNumber",
                                    jsonrpc::PARAMS_BY_POSITION, jsonrpc::JSON_OBJECT, "param1",
                                    jsonrpc::JSON_INTEGER, "param2", jsonrpc::JSON_STRING, NULL),
@@ -122,6 +146,11 @@ public:
                                    jsonrpc::JSON_STRING, NULL),
             &dev::rpc::RpcFace::sendRawTransactionI);
 
+        this->bindAndAddMethod(jsonrpc::Procedure("sendRawTransactionAndGetProof",
+                                   jsonrpc::PARAMS_BY_POSITION, jsonrpc::JSON_OBJECT, "param1",
+                                   jsonrpc::JSON_INTEGER, "param2", jsonrpc::JSON_STRING, NULL),
+            &dev::rpc::RpcFace::sendRawTransactionAndGetProofI);
+
         this->bindAndAddMethod(
             jsonrpc::Procedure("getCode", jsonrpc::PARAMS_BY_POSITION, jsonrpc::JSON_OBJECT,
                 "param1", jsonrpc::JSON_INTEGER, "param2", jsonrpc::JSON_STRING, NULL),
@@ -140,6 +169,45 @@ public:
                                    jsonrpc::PARAMS_BY_POSITION, jsonrpc::JSON_OBJECT, "param1",
                                    jsonrpc::JSON_INTEGER, "param2", jsonrpc::JSON_STRING, NULL),
             &dev::rpc::RpcFace::getTransactionReceiptByHashWithProofI);
+
+        this->bindAndAddMethod(
+            jsonrpc::Procedure("generateGroup", jsonrpc::PARAMS_BY_POSITION, jsonrpc::JSON_OBJECT,
+                "param1", jsonrpc::JSON_INTEGER, "param2", jsonrpc::JSON_OBJECT, NULL),
+            &dev::rpc::RpcFace::generateGroupI);
+
+        this->bindAndAddMethod(jsonrpc::Procedure("startGroup", jsonrpc::PARAMS_BY_POSITION,
+                                   jsonrpc::JSON_OBJECT, "param1", jsonrpc::JSON_INTEGER, NULL),
+            &dev::rpc::RpcFace::startGroupI);
+
+        this->bindAndAddMethod(jsonrpc::Procedure("stopGroup", jsonrpc::PARAMS_BY_POSITION,
+                                   jsonrpc::JSON_OBJECT, "param1", jsonrpc::JSON_INTEGER, NULL),
+            &dev::rpc::RpcFace::stopGroupI);
+
+        this->bindAndAddMethod(jsonrpc::Procedure("removeGroup", jsonrpc::PARAMS_BY_POSITION,
+                                   jsonrpc::JSON_OBJECT, "param1", jsonrpc::JSON_INTEGER, NULL),
+            &dev::rpc::RpcFace::removeGroupI);
+
+        this->bindAndAddMethod(jsonrpc::Procedure("recoverGroup", jsonrpc::PARAMS_BY_POSITION,
+                                   jsonrpc::JSON_OBJECT, "param1", jsonrpc::JSON_INTEGER, NULL),
+            &dev::rpc::RpcFace::recoverGroupI);
+
+        this->bindAndAddMethod(jsonrpc::Procedure("queryGroupStatus", jsonrpc::PARAMS_BY_POSITION,
+                                   jsonrpc::JSON_OBJECT, "param1", jsonrpc::JSON_INTEGER, NULL),
+            &dev::rpc::RpcFace::queryGroupStatusI);
+
+        this->bindAndAddMethod(
+            jsonrpc::Procedure("getBatchReceiptsByBlockNumberAndRange", jsonrpc::PARAMS_BY_POSITION,
+                jsonrpc::JSON_OBJECT, "param1", jsonrpc::JSON_INTEGER, "param2",
+                jsonrpc::JSON_STRING, "param3", jsonrpc::JSON_STRING, "param4",
+                jsonrpc::JSON_STRING, "param5", jsonrpc::JSON_BOOLEAN, NULL),
+            &dev::rpc::RpcFace::getBatchReceiptsByBlockNumberAndRangeI);
+
+        this->bindAndAddMethod(
+            jsonrpc::Procedure("getBatchReceiptsByBlockHashAndRange", jsonrpc::PARAMS_BY_POSITION,
+                jsonrpc::JSON_OBJECT, "param1", jsonrpc::JSON_INTEGER, "param2",
+                jsonrpc::JSON_STRING, "param3", jsonrpc::JSON_STRING, "param4",
+                jsonrpc::JSON_STRING, "param5", jsonrpc::JSON_BOOLEAN, NULL),
+            &dev::rpc::RpcFace::getBatchReceiptsByBlockHashAndRangeI);
     }
 
     inline virtual void getSystemConfigByKeyI(const Json::Value& request, Json::Value& response)
@@ -159,6 +227,10 @@ public:
     {
         response = this->getSealerList(boost::lexical_cast<int>(request[0u].asString()));
     }
+    inline virtual void getEpochSealersListI(const Json::Value& request, Json::Value& response)
+    {
+        response = this->getEpochSealersList(boost::lexical_cast<int>(request[0u].asString()));
+    }
     inline virtual void getObserverListI(const Json::Value& request, Json::Value& response)
     {
         response = this->getObserverList(boost::lexical_cast<int>(request[0u].asString()));
@@ -176,6 +248,10 @@ public:
     inline virtual void getClientVersionI(const Json::Value&, Json::Value& response)
     {
         response = this->getClientVersion();
+    }
+    inline virtual void getNodeInfoI(const Json::Value&, Json::Value& response)
+    {
+        response = this->getNodeInfo();
     }
     inline virtual void getPeersI(const Json::Value& request, Json::Value& response)
     {
@@ -204,6 +280,19 @@ public:
         response = this->getBlockByNumber(boost::lexical_cast<int>(request[0u].asString()),
             request[1u].asString(), request[2u].asBool());
     }
+
+    inline virtual void getBlockHeaderByNumberI(const Json::Value& request, Json::Value& response)
+    {
+        response = this->getBlockHeaderByNumber(boost::lexical_cast<int>(request[0u].asString()),
+            request[1u].asString(), request[2u].asBool());
+    }
+
+    inline virtual void getBlockHeaderByHashI(const Json::Value& request, Json::Value& response)
+    {
+        response = this->getBlockHeaderByHash(boost::lexical_cast<int>(request[0u].asString()),
+            request[1u].asString(), request[2u].asBool());
+    }
+
     inline virtual void getBlockHashByNumberI(const Json::Value& request, Json::Value& response)
     {
         response = this->getBlockHashByNumber(
@@ -261,6 +350,13 @@ public:
             boost::lexical_cast<int>(request[0u].asString()), request[1u].asString());
     }
 
+    inline virtual void sendRawTransactionAndGetProofI(
+        const Json::Value& request, Json::Value& response)
+    {
+        response = this->sendRawTransactionAndGetProof(
+            boost::lexical_cast<int>(request[0u].asString()), request[1u].asString());
+    }
+
     inline virtual void getTransactionByHashWithProofI(
         const Json::Value& request, Json::Value& response)
     {
@@ -276,6 +372,53 @@ public:
             boost::lexical_cast<int>(request[0u].asString()), request[1u].asString());
     }
 
+    inline virtual void generateGroupI(const Json::Value& request, Json::Value& response)
+    {
+        response =
+            this->generateGroup(boost::lexical_cast<int>(request[0u].asString()), request[1u]);
+    }
+
+    inline virtual void startGroupI(const Json::Value& request, Json::Value& response)
+    {
+        response = this->startGroup(boost::lexical_cast<int>(request[0u].asString()));
+    }
+
+    inline virtual void stopGroupI(const Json::Value& request, Json::Value& response)
+    {
+        response = this->stopGroup(boost::lexical_cast<int>(request[0u].asString()));
+    }
+
+    inline virtual void removeGroupI(const Json::Value& request, Json::Value& response)
+    {
+        response = this->removeGroup(boost::lexical_cast<int>(request[0u].asString()));
+    }
+
+    inline virtual void recoverGroupI(const Json::Value& request, Json::Value& response)
+    {
+        response = this->recoverGroup(boost::lexical_cast<int>(request[0u].asString()));
+    }
+
+    inline virtual void queryGroupStatusI(const Json::Value& request, Json::Value& response)
+    {
+        response = this->queryGroupStatus(boost::lexical_cast<int>(request[0u].asString()));
+    }
+
+    virtual void getBatchReceiptsByBlockNumberAndRangeI(
+        const Json::Value& _request, Json::Value& _response)
+    {
+        _response = this->getBatchReceiptsByBlockNumberAndRange(
+            boost::lexical_cast<int>(_request[0u].asString()), _request[1u].asString(),
+            _request[2u].asString(), _request[3u].asString(), _request[4u].asBool());
+    }
+
+    virtual void getBatchReceiptsByBlockHashAndRangeI(
+        const Json::Value& _request, Json::Value& _response)
+    {
+        _response = this->getBatchReceiptsByBlockHashAndRange(
+            boost::lexical_cast<int>(_request[0u].asString()), _request[1u].asString(),
+            _request[2u].asString(), _request[3u].asString(), _request[4u].asBool());
+    }
+
     // system config part
     virtual std::string getSystemConfigByKey(int param1, const std::string& param2) = 0;
 
@@ -283,6 +426,7 @@ public:
     virtual std::string getBlockNumber(int param1) = 0;
     virtual std::string getPbftView(int param1) = 0;
     virtual Json::Value getSealerList(int param1) = 0;
+    virtual Json::Value getEpochSealersList(int param1) = 0;
     virtual Json::Value getObserverList(int param1) = 0;
     virtual Json::Value getConsensusStatus(int param1) = 0;
 
@@ -291,6 +435,7 @@ public:
 
     // p2p part
     virtual Json::Value getClientVersion() = 0;
+    virtual Json::Value getNodeInfo() = 0;
     virtual Json::Value getPeers(int param1) = 0;
     virtual Json::Value getGroupPeers(int param1) = 0;
     virtual Json::Value getGroupList() = 0;
@@ -300,6 +445,11 @@ public:
     virtual Json::Value getBlockByHash(int param1, const std::string& param2, bool param3) = 0;
     virtual Json::Value getBlockByNumber(int param1, const std::string& param2, bool param3) = 0;
     virtual std::string getBlockHashByNumber(int param1, const std::string& param2) = 0;
+
+    virtual Json::Value getBlockHeaderByNumber(
+        int _groupID, const std::string& _blockNumber, bool _includeSigList = false) = 0;
+    virtual Json::Value getBlockHeaderByHash(
+        int _groupID, const std::string& _blockHash, bool _includeSigList = false) = 0;
 
     // transaction part
     /// @return the information about a transaction requested by transaction hash.
@@ -325,11 +475,27 @@ public:
     virtual Json::Value call(int param1, const Json::Value& param2) = 0;
     /// Creates new message call transaction or a contract creation for signed transactions.
     virtual std::string sendRawTransaction(int param1, const std::string& param2) = 0;
+    virtual std::string sendRawTransactionAndGetProof(int _groupID, const std::string& rlp) = 0;
     // Get merkle transaction with proof by hash
     virtual Json::Value getTransactionByHashWithProof(int param1, const std::string& param2) = 0;
     // Get receipt with merkle proof by hash
     virtual Json::Value getTransactionReceiptByHashWithProof(
         int param1, const std::string& param2) = 0;
+
+    // Group operation part
+    virtual Json::Value generateGroup(int param1, const Json::Value& param2) = 0;
+    virtual Json::Value startGroup(int param1) = 0;
+    virtual Json::Value stopGroup(int param1) = 0;
+    virtual Json::Value removeGroup(int param1) = 0;
+    virtual Json::Value recoverGroup(int param1) = 0;
+    virtual Json::Value queryGroupStatus(int param1) = 0;
+
+    virtual Json::Value getBatchReceiptsByBlockNumberAndRange(int _groupID,
+        const std::string& _blockNumber, std::string const& _from, std::string const& _count,
+        bool compress = true) = 0;
+    virtual Json::Value getBatchReceiptsByBlockHashAndRange(int _groupID,
+        const std::string& _blockHash, std::string const& _from, std::string const& _count,
+        bool compress = true) = 0;
 };
 
 }  // namespace rpc

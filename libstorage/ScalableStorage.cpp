@@ -63,16 +63,20 @@ bool ScalableStorage::isStateData(const string& _tableName)
            find(m_archiveTables.begin(), m_archiveTables.end(), _tableName);
 }
 
-string ScalableStorage::getDBNameOfArchivedBlock(int64_t _blockNumber)
+string ScalableStorage::getDBNameOfArchivedBlock(int64_t _blockNumber, bool _noException)
 {
     auto tableInfo = std::make_shared<storage::TableInfo>();
     tableInfo->name = TABLE_BLOCK_TO_DB_NAME;
     tableInfo->key = "number";
     auto entries = m_state->select(_blockNumber, tableInfo, to_string(_blockNumber), nullptr);
-    if (!entries)
+    if (!entries || entries->size() == 0)
     {
+        if (_noException)
+        {
+            return "";
+        }
         SCALABLE_STORAGE_LOG(FATAL)
-            << "Can't archived block's dbName" << LOG_KV("blockNumber", _blockNumber);
+            << "Can't find archived block's dbName" << LOG_KV("blockNumber", _blockNumber);
     }
     return entries->get(0)->getField(DB_NAME);
 }
@@ -83,7 +87,7 @@ Entries::Ptr ScalableStorage::selectFromArchive(
     Guard l(m_archiveMutex);
     if (num < m_archiveDBName)
     {
-        auto dbName = lexical_cast<int64_t>(getDBNameOfArchivedBlock(num));
+        auto dbName = lexical_cast<int64_t>(getDBNameOfArchivedBlock(num, false));
         auto dataStorage = m_storageFactory->getStorage(to_string(dbName), false);
         if (!dataStorage)
         {
@@ -112,6 +116,9 @@ Entries::Ptr ScalableStorage::select(
 {
     if (isStateData(tableInfo->name))
     {
+        SCALABLE_STORAGE_LOG(TRACE)
+            << "select from state DB" << LOG_KV("dbName", tableInfo->name)
+            << LOG_KV("key", key) << LOG_KV("number", num);
         return m_state->select(num, tableInfo, key, condition);
     }
     else
@@ -125,6 +132,7 @@ Entries::Ptr ScalableStorage::select(
             {
                 SCALABLE_STORAGE_LOG(FATAL) << "select from remote DB failed";
             }
+            conversionData(tableInfo->name, entries);
             return entries;
         }
         else if (m_archive)
@@ -134,6 +142,25 @@ Entries::Ptr ScalableStorage::select(
     }
     SCALABLE_STORAGE_LOG(FATAL) << "Can't find data or remote storage died, please check!";
     return nullptr;
+}
+
+void ScalableStorage::conversionData(const std::string& tableName, Entries::Ptr entries)
+{
+    if (m_archiveTables.end() != find(m_archiveTables.begin(), m_archiveTables.end(), tableName))
+    {
+        LOG(TRACE) << LOG_BADGE("ScalableStorage") << LOG_DESC("conversion table data") << LOG_KV("table name", tableName);
+        for (size_t i = 0; i < entries->size(); i++)
+        {
+            auto entry = entries->get(i);
+            auto dataStr = entry->getField("value");
+            auto dataBytes = std::make_shared<bytes>(fromHex(dataStr.c_str()));
+            entry->setField("value", dataBytes->data(), dataBytes->size());
+        }
+    } 
+    else 
+    {
+        LOG(ERROR) << LOG_BADGE("ScalableStorage") << LOG_DESC("invalid table data") << LOG_KV("table name", tableName);
+    }
 }
 
 void ScalableStorage::separateData(const vector<TableData::Ptr>& datas,

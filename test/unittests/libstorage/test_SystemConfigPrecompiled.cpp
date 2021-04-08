@@ -36,6 +36,12 @@ struct SystemConfigPrecompiledFixture
         factory.initExecutiveContext(blockInfo, h256(0), context);
         systemConfigPrecompiled = std::make_shared<SystemConfigPrecompiled>();
         memoryTableFactory = context->getMemoryTableFactory();
+
+        auto precompiledGasFactory = std::make_shared<dev::precompiled::PrecompiledGasFactory>(0);
+        auto precompiledExecResultFactory =
+            std::make_shared<dev::precompiled::PrecompiledExecResultFactory>();
+        precompiledExecResultFactory->setPrecompiledGasFactory(precompiledGasFactory);
+        systemConfigPrecompiled->setPrecompiledExecResultFactory(precompiledExecResultFactory);
     }
 
     ~SystemConfigPrecompiledFixture() {}
@@ -48,49 +54,70 @@ struct SystemConfigPrecompiledFixture
 
 BOOST_FIXTURE_TEST_SUITE(SystemConfigPrecompiled, SystemConfigPrecompiledFixture)
 
-BOOST_AUTO_TEST_CASE(TestAddConfig)
+void checkConfig(TableFactory::Ptr _memoryTableFactory, std::string const& _key,
+    std::string const& _expectedValue)
+{
+    LOG(INFO) << "Check the inserted key-value";
+    auto table = _memoryTableFactory->openTable(SYS_CONFIG);
+    auto condition = table->newCondition();
+    auto entries = table->select(_key, condition);
+    BOOST_TEST(entries->size() == 1u);
+    std::string ret = entries->get(0)->getField(SYSTEM_CONFIG_VALUE);
+    BOOST_TEST(ret == _expectedValue);
+}
+
+void updateValue(dev::precompiled::SystemConfigPrecompiled::Ptr _precompiled,
+    ExecutiveContext::Ptr _context, std::string const& _key, std::string const& _value)
 {
     eth::ContractABI abi;
 
     LOG(INFO) << "Add a config key-value";
-    std::string key1 = "tx_count_limit";
-    uint64_t value1 = 10000000;
-    bytes in =
-        abi.abiIn("setValueByKey(string,string)", key1, boost::lexical_cast<std::string>(value1));
-    bytes out = systemConfigPrecompiled->call(context, bytesConstRef(&in));
+    bytes in = abi.abiIn("setValueByKey(string,string)", _key, _value);
+    auto callResult = _precompiled->call(_context, bytesConstRef(&in));
+    bytes out = callResult->execResult();
     s256 count = 0;
     abi.abiOut(bytesConstRef(&out), count);
     BOOST_TEST(count == 1u);
+}
 
-    LOG(INFO) << "Check the inserted key-value";
-    auto table = memoryTableFactory->openTable(SYS_CONFIG);
-    auto condition = table->newCondition();
-    auto entries = table->select(key1, condition);
-    BOOST_TEST(entries->size() == 1u);
-    std::string ret = entries->get(0)->getField(SYSTEM_CONFIG_VALUE);
-    BOOST_TEST(boost::lexical_cast<uint64_t>(ret) == value1);
+BOOST_AUTO_TEST_CASE(TestAddConfig)
+{
+    // test tx_count_limit
+    uint64_t value = 10000000;
+    std::string valueStr = boost::lexical_cast<std::string>(value);
+    updateValue(systemConfigPrecompiled, context, "tx_count_limit", valueStr);
+    checkConfig(memoryTableFactory, "tx_count_limit", valueStr);
 
     LOG(INFO) << "update the inserted key-value";
     uint64_t value2 = 20000000;
-    in = abi.abiIn("setValueByKey(string,string)", key1, boost::lexical_cast<std::string>(value2));
-    out = systemConfigPrecompiled->call(context, bytesConstRef(&in));
-    count = 0;
-    abi.abiOut(bytesConstRef(&out), count);
-    BOOST_TEST(count == 1u);
+    valueStr = boost::lexical_cast<std::string>(value2);
+    updateValue(systemConfigPrecompiled, context, "tx_count_limit", valueStr);
 
     LOG(INFO) << "Check the new inserted key-value";
-    table = memoryTableFactory->openTable(SYS_CONFIG);
-    entries = table->select(key1, condition);
-    BOOST_TEST(entries->size() == 1u);
-    ret = entries->get(0)->getField(SYSTEM_CONFIG_VALUE);
-    BOOST_TEST(boost::lexical_cast<uint64_t>(ret) == value2);
+    checkConfig(memoryTableFactory, "tx_count_limit", valueStr);
+
+    // test tx_gas_limit
+    valueStr = boost::lexical_cast<std::string>(1000000);
+    updateValue(systemConfigPrecompiled, context, "tx_gas_limit", valueStr);
+    checkConfig(memoryTableFactory, "tx_gas_limit", valueStr);
+
+    // test epoch_block_num
+    valueStr = boost::lexical_cast<std::string>(2);
+    updateValue(systemConfigPrecompiled, context, SYSTEM_KEY_RPBFT_EPOCH_BLOCK_NUM, valueStr);
+    checkConfig(memoryTableFactory, SYSTEM_KEY_RPBFT_EPOCH_BLOCK_NUM, valueStr);
+
+    // test epoch_sealer_num
+    valueStr = boost::lexical_cast<std::string>(10);
+    updateValue(systemConfigPrecompiled, context, SYSTEM_KEY_RPBFT_EPOCH_SEALER_NUM, valueStr);
+    checkConfig(memoryTableFactory, SYSTEM_KEY_RPBFT_EPOCH_SEALER_NUM, valueStr);
 }
 
 BOOST_AUTO_TEST_CASE(errFunc)
 {
     eth::ContractABI abi;
     bytes in = abi.abiIn("insert(string)", std::string("test"));
-    bytes out = systemConfigPrecompiled->call(context, bytesConstRef(&in));
+    auto callResult = systemConfigPrecompiled->call(context, bytesConstRef(&in));
+    bytes out = callResult->execResult();
 }
 
 BOOST_AUTO_TEST_CASE(InvalidValue)
@@ -98,7 +125,8 @@ BOOST_AUTO_TEST_CASE(InvalidValue)
     eth::ContractABI abi;
     bytes in =
         abi.abiIn("setValueByKey(string,string)", std::string("tx_count_limit"), std::string("0"));
-    bytes out = systemConfigPrecompiled->call(context, bytesConstRef(&in));
+    auto callResult = systemConfigPrecompiled->call(context, bytesConstRef(&in));
+    bytes out = callResult->execResult();
     s256 count = 1;
     abi.abiOut(bytesConstRef(&out), count);
     if (g_BCOSConfig.version() > RC2_VERSION)
@@ -111,7 +139,8 @@ BOOST_AUTO_TEST_CASE(InvalidValue)
     }
 
     in = abi.abiIn("setValueByKey(string,string)", std::string("tx_count_limit"), std::string("0"));
-    out = systemConfigPrecompiled->call(context, bytesConstRef(&in));
+    callResult = systemConfigPrecompiled->call(context, bytesConstRef(&in));
+    out = callResult->execResult();
     count = 1;
     abi.abiOut(bytesConstRef(&out), count);
     if (g_BCOSConfig.version() > RC2_VERSION)

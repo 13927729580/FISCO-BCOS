@@ -26,24 +26,25 @@
 
 namespace dev
 {
-namespace blockverifier
+namespace precompiled
 {
 #if 0
 contract Condition {
-    function EQ(string, int);
-    function EQ(string, string);
+    function EQ(string, int) public view;
+    function EQ(string, string) public view;
+    function EQ(string, address) public view;
 
-    function NE(string, int);
-    function NE(string, string);
+    function NE(string, int) public view;
+    function NE(string, string) public view;
 
-    function GT(string, int);
-    function GE(string, int);
+    function GT(string, int) public view;
+    function GE(string, int) public view;
 
-    function LT(string, int);
-    function LE(string, int);
+    function LT(string, int) public view;
+    function LE(string, int) public view;
 
-    function limit(int);
-    function limit(int, int);
+    function limit(int) public view;
+    function limit(int, int) public view;
 }
 {
     "e44594b9": "EQ(string,int256)",
@@ -67,22 +68,26 @@ public:
     virtual ~ConditionPrecompiled(){};
 
 
-    virtual std::string toString();
+    std::string toString() override;
 
-    virtual bytes call(
-        ExecutiveContext::Ptr context, bytesConstRef param, Address const& origin = Address());
+    PrecompiledExecResult::Ptr call(std::shared_ptr<dev::blockverifier::ExecutiveContext> context,
+        bytesConstRef param, Address const& origin = Address(),
+        Address const& _sender = Address()) override;
 
-    void setPrecompiledEngine(ExecutiveContext::Ptr engine) { m_exeEngine = engine; }
+    void setPrecompiledEngine(std::shared_ptr<dev::blockverifier::ExecutiveContext> engine)
+    {
+        m_exeEngine = engine;
+    }
 
     void setCondition(dev::storage::Condition::Ptr condition) { m_condition = condition; }
     dev::storage::Condition::Ptr getCondition() { return m_condition; }
 
 private:
-    ExecutiveContext::Ptr m_exeEngine;
+    std::shared_ptr<dev::blockverifier::ExecutiveContext> m_exeEngine;
     // condition must been setted
     dev::storage::Condition::Ptr m_condition;
 };
 
-}  // namespace blockverifier
+}  // namespace precompiled
 
 }  // namespace dev

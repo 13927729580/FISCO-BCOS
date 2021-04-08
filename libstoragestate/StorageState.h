@@ -39,6 +39,8 @@ const char* const ACCOUNT_CODE_HASH = "codeHash";
 const char* const ACCOUNT_CODE = "code";
 const char* const ACCOUNT_NONCE = "nonce";
 const char* const ACCOUNT_ALIVE = "alive";
+const char* const ACCOUNT_AUTHORITY = "authority";
+const char* const ACCOUNT_FROZEN = "frozen";
 
 class StorageState : public dev::executive::StateFace
 {
@@ -117,9 +119,13 @@ public:
     bytes const code(Address const& _address) const override;
 
     /// Get the code hash of an account.
-    /// @returns EmptySHA3 if no account exists at that address or if there is no code associated
-    /// with the address.
+    /// @returns EmptyHash if no account exists at that address or if there is no code
+    /// associated with the address.
     h256 codeHash(Address const& _contract) const override;
+
+    /// Get the frozen status of an account.
+    /// @returns ture if the account is frozen.
+    bool frozen(Address const& _contract) const override;
 
     /// Get the byte-size of the code of an account.
     /// @returns code(_contract).size(), but utilizes CodeSizeHash.
@@ -174,7 +180,6 @@ public:
 private:
     void createAccount(Address const& _address, u256 const& _nonce, u256 const& _amount = u256(0));
     std::shared_ptr<dev::storage::Table> getTable(Address const& _address) const;
-    /// check authority by caller
     u256 m_accountStartNonce;
     std::shared_ptr<dev::storage::TableFactory> m_memoryTableFactory;
 };

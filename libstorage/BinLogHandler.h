@@ -123,7 +123,7 @@ private:
     /// @param entries/table : [out] data read
     /// @return : buffer length read
     uint32_t decodeEntries(const bytes& buffer, uint32_t& offset,
-        const std::vector<std::string>& vecField, Entries::Ptr entries);
+        const std::vector<std::string>& vecField, Entries::Ptr entries, bool force);
     uint32_t decodeTable(const bytes& buffer, uint32_t& offset, TableData::Ptr table);
     /// decodeBlock, block num in (startNum,endNum]
     /// @param buffer : [in] data buffer in a block
@@ -141,6 +141,8 @@ private:
     int64_t getFirstBlockNumInBinLog(const std::string& filePath);
 
     bool readFile(std::ifstream& file, void* buffer, uint32_t size);
+
+    void checkBinLogSize();
 
     uint32_t m_writtenBytesLength = 0;  // length already written
     int m_fd;                           // the file being written

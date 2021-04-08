@@ -25,7 +25,6 @@
 #include <libblockchain/BlockChainInterface.h>
 #include <libdevcore/Guards.h>
 #include <libethcore/Block.h>
-#include <libp2p/StatisticHandler.h>
 #include <climits>
 #include <queue>
 #include <set>
@@ -59,7 +58,7 @@ class DownloadingBlockQueue
 {
 public:
     using ShardPtr = std::shared_ptr<DownloadBlocksShard>;
-    using ShardPtrVec = std::vector<ShardPtr>;
+    using ShardPtrVec = std::list<ShardPtr>;
 
 public:
     DownloadingBlockQueue(std::shared_ptr<dev::blockchain::BlockChainInterface> _blockChain,
@@ -101,10 +100,16 @@ public:
 
     void clearFullQueueIfNotHas(int64_t _blockNumber);
 
-    void setStatHandler(dev::p2p::StatisticHandler::Ptr _statisticHandler)
+    void setMaxBlockQueueSize(int64_t const& _maxBlockQueueSize)
     {
-        m_statisticHandler = _statisticHandler;
+        m_maxBlockQueueSize = _maxBlockQueueSize;
     }
+
+    int64_t maxRequestBlocks() const { return m_maxRequestBlocks; }
+    void adjustMaxRequestBlocks();
+
+private:
+    bool flushOneShard(ShardPtr _blocksShard);
 
 private:
     std::shared_ptr<dev::blockchain::BlockChainInterface> m_blockChain;
@@ -114,7 +119,17 @@ private:
 
     mutable SharedMutex x_blocks;
     mutable SharedMutex x_buffer;
-    dev::p2p::StatisticHandler::Ptr m_statisticHandler = nullptr;
+    // default max block buffer size is 512MB
+    int64_t m_maxBlockQueueSize = 512 * 1024 * 1024;
+    // the memory size occupied by the sync module
+    std::atomic<int64_t> m_blockQueueSize = {0};
+    // the max number of blocks this node can requested to
+    std::atomic<int64_t> m_maxRequestBlocks = {8};
+    // the average size of synced blocks
+    std::atomic<int64_t> m_averageBlockSize = {0};
+    std::atomic<int64_t> m_averageCalCount = {0};
+    // the expand coeff of memory-size after block-decode
+    int64_t const m_blockSizeExpandCoeff = 3;
 
 private:
     bool isNewerBlock(std::shared_ptr<dev::eth::Block> _block);

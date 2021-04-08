@@ -22,6 +22,7 @@
  */
 #pragma once
 #include <libdevcrypto/Common.h>
+#include <libdevcrypto/CryptoInterface.h>
 #include <libethcore/Block.h>
 #include <libethcore/BlockFactory.h>
 #include <libethcore/BlockHeader.h>
@@ -31,6 +32,7 @@
 #include <boost/test/unit_test.hpp>
 
 using namespace dev;
+using namespace std;
 using namespace dev::eth;
 
 namespace dev
@@ -41,13 +43,13 @@ class FakeBlock
 {
 public:
     /// for normal case test
-    FakeBlock(size_t size, Secret const& sec = KeyPair::create().secret(), uint64_t blockNumber = 0,
+    FakeBlock(size_t size, KeyPair const& keyPair = KeyPair::create(), uint64_t blockNumber = 0,
         std::shared_ptr<BlockFactory> _blockFactory = nullptr)
     {
-        m_sigList = std::make_shared<std::vector<std::pair<u256, Signature>>>();
+        m_sigList = std::make_shared<std::vector<std::pair<u256, std::vector<unsigned char>>>>();
         m_transaction = std::make_shared<Transactions>();
         m_transactionReceipt = std::make_shared<TransactionReceipts>();
-        m_sec = sec;
+        m_keyPair = keyPair;
         FakeBlockHeader(blockNumber);
         FakeSigList(size);
         FakeTransaction(size);
@@ -73,7 +75,7 @@ public:
     /// for empty case test
     FakeBlock(std::shared_ptr<BlockFactory> _blockFactory = nullptr)
     {
-        m_sigList = std::make_shared<std::vector<std::pair<u256, Signature>>>();
+        m_sigList = std::make_shared<std::vector<std::pair<u256, std::vector<unsigned char>>>>();
         m_transaction = std::make_shared<Transactions>();
         m_transactionReceipt = std::make_shared<TransactionReceipts>();
         if (_blockFactory)
@@ -86,6 +88,7 @@ public:
         }
         m_block->setBlockHeader(m_blockHeader);
         m_block->encode(m_blockData);
+        m_keyPair = KeyPair::create();
     }
 
     /// fake invalid block data
@@ -123,19 +126,28 @@ public:
         m_block->header().setGasUsed(u256(3000000000));
         m_blockHeader.encode(m_blockHeaderData);
         BOOST_CHECK_THROW(m_block->encode(m_blockData), TooMuchGasUsed);
+
         /// construct invalid block format
-        for (size_t i = 1; i < 3; i++)
+        bytes result_bytes = FakeInvalidBlockData(1, size);
+        BOOST_CHECK_THROW(m_block->decode(ref(result_bytes)), InvalidBlockFormat);
+
+        result_bytes = FakeInvalidBlockData(2, size);
+        if (g_BCOSConfig.version() >= RC2_VERSION)
         {
-            bytes result_bytes = FakeInvalidBlockData(i, size);
             BOOST_CHECK_THROW(m_block->decode(ref(result_bytes)), InvalidBlockFormat);
+        }
+        else
+        {
+            BOOST_CHECK_THROW(m_block->decode(ref(result_bytes)), BadCast);
         }
     }
 
     /// fake block header
     void FakeBlockHeader(uint64_t blockNumber)
     {
-        m_blockHeader.setParentHash(sha3("parent"));
-        m_blockHeader.setRoots(sha3("transactionRoot"), sha3("receiptRoot"), sha3("stateRoot"));
+        m_blockHeader.setParentHash(crypto::Hash("parent"));
+        m_blockHeader.setRoots(crypto::Hash("transactionRoot"), crypto::Hash("receiptRoot"),
+            crypto::Hash("stateRoot"));
         m_blockHeader.setLogBloom(LogBloom(0));
         m_blockHeader.setNumber(blockNumber);
         m_blockHeader.setGasLimit(u256(3000000));
@@ -148,7 +160,7 @@ public:
         for (unsigned int i = 0; i < 13; i++)
         {
             /// sealer_list.push_back(toPublic(Secret(h256(i))));
-            sealer_list.push_back(toPublic(m_sec));
+            sealer_list.push_back(m_keyPair.pub());
         }
         m_blockHeader.setSealerList(sealer_list);
     }
@@ -157,14 +169,13 @@ public:
     void FakeSigList(size_t size)
     {
         /// set sig list
-        Signature sig;
         h256 block_hash;
         m_sigList->clear();
         for (size_t i = 0; i < size; i++)
         {
             block_hash = m_blockHeader.hash();
-            sig = sign(m_sec, block_hash);
-            m_sigList->push_back(std::make_pair(u256(i), sig));
+            auto sig = dev::crypto::Sign(m_keyPair, block_hash);
+            m_sigList->push_back(std::make_pair(u256(i), sig->asBytes()));
         }
     }
 
@@ -177,7 +188,7 @@ public:
         fakeSingleTransaction();
         for (size_t i = 0; i < size; i++)
         {
-            (*m_transaction)[i] = std::make_shared<Transaction>(m_singleTransaction);
+            (*m_transaction)[i] = fakeSingleTransaction();
         }
         m_transactionData = TxsParallelParser::encode(m_transaction);
     }
@@ -188,12 +199,12 @@ public:
         for (size_t i = 0; i < size; ++i)
         {
             (*m_transactionReceipt)[i] =
-                std::make_shared<TransactionReceipt>(m_singleTransactionReceipt);
+                std::make_shared<TransactionReceipt>(*m_singleTransactionReceipt);
         }
     }
 
     /// fake single transaction
-    void fakeSingleTransaction()
+    Transaction::Ptr fakeSingleTransaction()
     {
         u256 value = u256(100);
         u256 gas = u256(100000000);
@@ -201,10 +212,13 @@ public:
         Address dst;
         std::string str = "test transaction";
         bytes data(str.begin(), str.end());
-        m_singleTransaction = Transaction(value, gasPrice, gas, dst, data, 2);
-        SignatureStruct sig = dev::sign(m_sec, m_singleTransaction.sha3(WithoutSignature));
+        auto fakedTx = std::make_shared<Transaction>(value, gasPrice, gas, dst, data, 2);
+        m_singleTransaction = fakedTx;
+        std::shared_ptr<crypto::Signature> sig =
+            dev::crypto::Sign(m_keyPair, m_singleTransaction->hash(WithoutSignature));
         /// update the signature of transaction
-        m_singleTransaction.updateSignature(sig);
+        m_singleTransaction->updateSignature(sig);
+        return fakedTx;
     }
 
     void fakeSingleTransactionReceipt()
@@ -212,11 +226,40 @@ public:
         h256 root = h256("0x1024");
         u256 gasUsed = u256(10000);
         LogEntries logEntries = LogEntries();
-        executive::TransactionException status = executive::TransactionException::Unknown;
+        eth::TransactionException status = eth::TransactionException::Unknown;
         bytes outputBytes = bytes();
         Address address = toAddress(KeyPair::create().pub());
-        m_singleTransactionReceipt =
-            TransactionReceipt(root, gasUsed, logEntries, status, outputBytes, address);
+        m_singleTransactionReceipt = std::make_shared<TransactionReceipt>(
+            root, gasUsed, logEntries, status, outputBytes, address);
+    }
+
+    shared_ptr<Transactions> fakeTransactions(size_t _num, int64_t _currentBlockNumber)
+    {
+        std::srand(utcTime());
+        shared_ptr<Transactions> txs = make_shared<Transactions>();
+        for (size_t i = 0; i < _num; ++i)
+        {
+            /// Transaction tx(ref(c_txBytes), CheckTransaction::Everything);
+            u256 value = u256(100);
+            u256 gas = u256(100000000);
+            u256 gasPrice = u256(0);
+            Address dst = toAddress(KeyPair::create().pub());
+            std::string str = "test transaction";
+            bytes data(str.begin(), str.end());
+            Transaction::Ptr tx = std::make_shared<Transaction>(value, gasPrice, gas, dst, data);
+            KeyPair sigKeyPair = KeyPair::create();
+            tx->setNonce(tx->nonce() + utcTime() + m_nonceBase);
+            tx->setBlockLimit(u256(_currentBlockNumber) + c_maxBlockLimit);
+            tx->setRpcTx(true);
+            std::shared_ptr<crypto::Signature> sig =
+                dev::crypto::Sign(sigKeyPair.secret(), tx->hash(WithoutSignature));
+            /// update the signature of transaction
+            tx->updateSignature(sig);
+            // std::pair<h256, Address> ret = txPool->submit(tx);
+            txs->emplace_back(tx);
+            m_nonceBase++;
+        }
+        return txs;
     }
 
     std::shared_ptr<Block> getBlock() { return m_block; }
@@ -225,17 +268,19 @@ public:
     bytes& getBlockData() { return m_blockData; }
 
 public:
-    Secret m_sec;
+    KeyPair m_keyPair;
     std::shared_ptr<Block> m_block;
     BlockHeader m_blockHeader;
     std::shared_ptr<Transactions> m_transaction;
-    Transaction m_singleTransaction;
+    Transaction::Ptr m_singleTransaction;
     std::shared_ptr<TransactionReceipts> m_transactionReceipt;
-    TransactionReceipt m_singleTransactionReceipt;
-    std::shared_ptr<std::vector<std::pair<u256, Signature>>> m_sigList;
+    TransactionReceipt::Ptr m_singleTransactionReceipt = std::make_shared<TransactionReceipt>();
+    std::shared_ptr<std::vector<std::pair<u256, std::vector<unsigned char>>>> m_sigList;
     bytes m_blockHeaderData;
     bytes m_blockData;
     bytes m_transactionData;
+    size_t m_nonceBase = 0;
+    const u256 c_maxBlockLimit = u256(1000);
 };
 
 }  // namespace test

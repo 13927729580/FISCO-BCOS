@@ -21,15 +21,14 @@
 
 #pragma once
 
-
+#include "libdevcrypto/CryptoInterface.h"
+#include "libethcore/TransactionException.h"
 #include <libdevcore/Address.h>
 #include <libdevcore/CommonIO.h>
 #include <libdevcore/RLP.h>
 #include <libethcore/Common.h>
 #include <libethcore/LogEntry.h>
-#include <libexecutive/ExecutionResult.h>
 #include <array>
-
 namespace dev
 {
 namespace eth
@@ -39,10 +38,10 @@ class TransactionReceipt
 public:
     typedef std::shared_ptr<TransactionReceipt> Ptr;
 
-    TransactionReceipt() : m_status(executive::TransactionException::None){};
+    TransactionReceipt() : m_status(eth::TransactionException::None){};
     TransactionReceipt(bytesConstRef _rlp);
     TransactionReceipt(h256 const& _root, u256 const& _gasUsed, LogEntries const& _log,
-        executive::TransactionException _status, bytes _bytes,
+        eth::TransactionException _status, bytes _bytes,
         Address const& _contractAddress = Address());
     TransactionReceipt(TransactionReceipt const& _other);
     h256 const& stateRoot() const { return m_stateRoot; }
@@ -52,7 +51,7 @@ public:
     Address const& contractAddress() const { return m_contractAddress; }
     LogBloom const& bloom() const { return m_bloom; }
     LogEntries const& log() const { return m_log; }
-    executive::TransactionException const& status() const { return m_status; }
+    eth::TransactionException const& status() const { return m_status; }
     bytes const& outputBytes() const { return m_outputBytes; }
 
     void streamRLP(RLPStream& _s) const;
@@ -73,13 +72,13 @@ public:
         return m_receipt;
     }
 
-    const bytes& sha3()
+    const bytes& hash()
     {
-        if (m_sha3 == bytes())
+        if (m_hash == bytes())
         {
-            m_sha3 = dev::sha3(receipt()).asBytes();
+            m_hash = crypto::Hash(receipt()).asBytes();
         }
-        return m_sha3;
+        return m_hash;
     }
 
     bytes rlp() const
@@ -93,21 +92,22 @@ public:
     void decode(RLP const& rlp);
 
 private:
+    void decodeLog(RLP const& _r);
+
+protected:
+    eth::TransactionException m_status;
+
+private:
     h256 m_stateRoot;
     u256 m_gasUsed;
     Address m_contractAddress;
     LogBloom m_bloom;
 
-protected:
-    executive::TransactionException m_status;
-
-private:
     bytes m_outputBytes;
     LogEntries m_log;
 
-private:
     bytes m_receipt = bytes();
-    bytes m_sha3 = bytes();
+    bytes m_hash = bytes();
 };
 
 using TransactionReceipts = std::vector<TransactionReceipt::Ptr>;
@@ -138,7 +138,7 @@ public:
                 entries[i], m_blockHash, m_blockNumber, m_hash, m_transactionIndex, i));
     }
 
-    LocalisedTransactionReceipt(executive::TransactionException status) : m_blockNumber(0)
+    LocalisedTransactionReceipt(eth::TransactionException status) : m_blockNumber(0)
     {
         TransactionReceipt::m_status = status;
     };

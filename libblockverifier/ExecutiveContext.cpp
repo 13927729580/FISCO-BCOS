@@ -23,7 +23,6 @@
 
 #include <libethcore/ABIParser.h>
 #include <libethcore/Exceptions.h>
-#include <libexecutive/ExecutionResult.h>
 #include <libprecompiled/ParallelConfigPrecompiled.h>
 #include <libstorage/StorageException.h>
 #include <libstorage/Table.h>
@@ -34,8 +33,22 @@ using namespace dev::eth::abi;
 using namespace dev::blockverifier;
 using namespace dev;
 using namespace std;
+void ExecutiveContext::registerParallelPrecompiled(
+    std::shared_ptr<dev::precompiled::Precompiled> _precompiled)
+{
+    m_parallelConfigPrecompiled =
+        std::dynamic_pointer_cast<dev::precompiled::ParallelConfigPrecompiled>(_precompiled);
+}
 
-bytes ExecutiveContext::call(Address const& origin, Address address, bytesConstRef param)
+// set PrecompiledExecResultFactory for each precompiled object
+void ExecutiveContext::setPrecompiledExecResultFactory(
+    dev::precompiled::PrecompiledExecResultFactory::Ptr _precompiledExecResultFactory)
+{
+    m_precompiledExecResultFactory = _precompiledExecResultFactory;
+}
+
+dev::precompiled::PrecompiledExecResult::Ptr ExecutiveContext::call(
+    Address const& address, bytesConstRef param, Address const& origin, Address const& sender)
 {
     try
     {
@@ -43,20 +56,38 @@ bytes ExecutiveContext::call(Address const& origin, Address address, bytesConstR
 
         if (p)
         {
-            bytes out = p->call(shared_from_this(), param, origin);
-            return out;
+            auto execResult = p->call(shared_from_this(), param, origin, sender);
+            return execResult;
         }
         else
         {
             EXECUTIVECONTEXT_LOG(DEBUG)
                 << LOG_DESC("[call]Can't find address") << LOG_KV("address", address);
+            return std::make_shared<dev::precompiled::PrecompiledExecResult>();
         }
     }
-    catch (dev::storage::StorageException& e)
+    catch (dev::precompiled::PrecompiledException& e)
     {
-        EXECUTIVECONTEXT_LOG(ERROR) << "StorageException" << LOG_KV("address", address)
-                                    << LOG_KV("errorCode", e.errorCode());
-        throw dev::eth::PrecompiledError();
+        EXECUTIVECONTEXT_LOG(ERROR)
+            << "PrecompiledException" << LOG_KV("address", address) << LOG_KV("message:", e.what());
+        BOOST_THROW_EXCEPTION(e);
+    }
+    catch (dev::storage::StorageException const& e)
+    {
+        // throw PrecompiledError when supported_version < v2.7.0
+        if (g_BCOSConfig.version() < V2_7_0)
+        {
+            EXECUTIVECONTEXT_LOG(ERROR) << "StorageException" << LOG_KV("address", address)
+                                        << LOG_KV("errorCode", e.errorCode());
+            throw dev::eth::PrecompiledError();
+        }
+        else
+        {
+            dev::precompiled::PrecompiledException precompiledException(e);
+            EXECUTIVECONTEXT_LOG(ERROR)
+                << LOG_DESC("precompiledException") << LOG_KV("msg", e.what());
+            throw precompiledException;
+        }
     }
     catch (std::exception& e)
     {
@@ -65,15 +96,16 @@ bytes ExecutiveContext::call(Address const& origin, Address address, bytesConstR
 
         throw dev::eth::PrecompiledError();
     }
-
-    return bytes();
 }
 
-Address ExecutiveContext::registerPrecompiled(Precompiled::Ptr p)
+Address ExecutiveContext::registerPrecompiled(std::shared_ptr<precompiled::Precompiled> p)
 {
     auto count = ++m_addressCount;
     Address address(count);
-
+    if (!p->precompiledExecResultFactory())
+    {
+        p->setPrecompiledExecResultFactory(m_precompiledExecResultFactory);
+    }
     m_address2Precompiled.insert(std::make_pair(address, p));
 
     return address;
@@ -82,11 +114,10 @@ Address ExecutiveContext::registerPrecompiled(Precompiled::Ptr p)
 
 bool ExecutiveContext::isPrecompiled(Address address) const
 {
-    auto p = getPrecompiled(address);
-    return p.get() != NULL;
+    return (m_address2Precompiled.count(address));
 }
 
-Precompiled::Ptr ExecutiveContext::getPrecompiled(Address address) const
+std::shared_ptr<precompiled::Precompiled> ExecutiveContext::getPrecompiled(Address address) const
 {
     auto itPrecompiled = m_address2Precompiled.find(address);
 
@@ -94,7 +125,7 @@ Precompiled::Ptr ExecutiveContext::getPrecompiled(Address address) const
     {
         return itPrecompiled->second;
     }
-    return Precompiled::Ptr();
+    return std::shared_ptr<precompiled::Precompiled>();
 }
 
 std::shared_ptr<dev::executive::StateFace> ExecutiveContext::getState()
@@ -106,7 +137,7 @@ void ExecutiveContext::setState(std::shared_ptr<dev::executive::StateFace> state
     m_stateFace = state;
 }
 
-bool ExecutiveContext::isOrginPrecompiled(Address const& _a) const
+bool ExecutiveContext::isEthereumPrecompiled(Address const& _a) const
 {
     return m_precompiledContract.count(_a);
 }
@@ -115,6 +146,11 @@ std::pair<bool, bytes> ExecutiveContext::executeOriginPrecompiled(
     Address const& _a, bytesConstRef _in) const
 {
     return m_precompiledContract.at(_a).execute(_in);
+}
+
+bigint ExecutiveContext::costOfPrecompiled(Address const& _a, bytesConstRef _in) const
+{
+    return m_precompiledContract.at(_a).cost(_in);
 }
 
 void ExecutiveContext::setPrecompiledContract(
@@ -157,15 +193,25 @@ std::shared_ptr<std::vector<std::string>> ExecutiveContext::getTxCriticals(const
     }
     else
     {
-        // Normal transaction
-        auto parallelConfigPrecompiled =
-            std::dynamic_pointer_cast<dev::precompiled::ParallelConfigPrecompiled>(
-                getPrecompiled(Address(0x1006)));
+        uint32_t selector = dev::precompiled::getParamFunc(ref(_tx.data()));
 
-        uint32_t selector = parallelConfigPrecompiled->getParamFunc(ref(_tx.data()));
-
-        auto config = parallelConfigPrecompiled->getParallelConfig(
-            shared_from_this(), _tx.receiveAddress(), selector, _tx.sender());
+        auto receiveAddress = _tx.receiveAddress();
+        std::shared_ptr<dev::precompiled::ParallelConfig> config = nullptr;
+        // hit the cache, fetch ParallelConfig from the cache directly
+        // Note: Only when initializing DAG, get ParallelConfig, will not get ParallelConfig during
+        // transaction execution
+        auto parallelKey = std::make_pair(receiveAddress, selector);
+        if (m_parallelConfigCache.count(parallelKey))
+        {
+            config = m_parallelConfigCache[parallelKey];
+        }
+        // miss the cache, fetch ParallelConfig from the table and cache the config
+        else
+        {
+            config = m_parallelConfigPrecompiled->getParallelConfig(
+                shared_from_this(), receiveAddress, selector, _tx.sender());
+            m_parallelConfigCache.insert(std::make_pair(parallelKey, config));
+        }
 
         if (config == nullptr)
         {

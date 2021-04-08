@@ -22,6 +22,7 @@
  */
 
 #pragma once
+#include "Common.h"
 #include "EventLogFilter.h"
 #include <libdevcore/Worker.h>
 #include <atomic>
@@ -52,7 +53,8 @@ public:
     // constructor function
     EventLogFilterManager(std::shared_ptr<dev::blockchain::BlockChainInterface> _blockChain,
         int64_t _maxBlockRange = -1, int64_t _maxBlockPerLoopFilter = 10)
-      : m_blockChain(_blockChain),
+      : Worker("eventLog", 0),
+        m_blockChain(_blockChain),
         m_maxBlockRange(_maxBlockRange),
         m_maxBlockPerLoopFilter(_maxBlockPerLoopFilter)
     {}
@@ -84,21 +86,15 @@ public:
 public:
     // add EventLogFilter to m_filters by client json request
     int32_t addEventLogFilterByRequest(const EventLogFilterParams::Ptr _params, uint32_t _version,
-        std::function<bool(const std::string& _filterID, int32_t _result, const Json::Value& _logs)>
+        std::function<bool(const std::string& _filterID, int32_t _result, const Json::Value& _logs,
+            GROUP_ID const& _groupId)>
             _respCallback,
-        std::function<bool()> _activeCallback);
+        std::function<int(GROUP_ID _groupId)> _sessionCheckerCallback);
+
+    // delete EventLogFilter in m_filters by client json request
+    int32_t cancelEventLogFilterByRequest(const EventLogFilterParams::Ptr _params, uint32_t _version);
 
 public:
-    enum class filter_status
-    {
-        GROUP_ID_NOT_EXIST,
-        CALLBACK_FAILED,
-        ERROR_STATUS,
-        PUSH_COMPLETED,
-        WAIT_FOR_MORE_BLOCK,
-        WAIT_FOR_NEXT_LOOP
-    };
-
     bool isErrorStatus(filter_status status)
     {
         return ((status == filter_status::GROUP_ID_NOT_EXIST) ||
@@ -109,10 +105,13 @@ public:
     // main loop thread
     void doWork() override;
     void addFilter();
+    void cancelFilter();
     void executeFilters();
     filter_status executeFilter(EventLogFilter::Ptr _filter);
     // add _filter to m_filters waiting for loop thread to process
     void addEventLogFilter(EventLogFilter::Ptr _filter);
+    // delete _filter in m_filters waiting for loop thread to process
+    void cancelEventLogFilter(EventLogFilter::Ptr _filter);
 
 private:
     // the vector for all EventLogFilter
@@ -123,6 +122,12 @@ private:
     mutable std::mutex m_addMetux;
     // the count of EventLogFilter to be add to m_filters, reduce the range of lock
     std::atomic<uint64_t> m_waitAddCount{0};
+    // the EventLogFilter to be removed in m_filters
+    EventLogFilterVector m_waitCancelFilter;
+    // metux for m_waitCancelFilter
+    mutable std::mutex m_cancelMetux;
+    // the count of EventLogFilter to be removed in m_filters, reduce the range of lock
+    std::atomic<uint64_t> m_waitCancelCount{0};
     // the blockchain of this EventLogFilterManager own to
     std::shared_ptr<dev::blockchain::BlockChainInterface> m_blockChain;
     //  max block range should be permited

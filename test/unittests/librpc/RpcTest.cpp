@@ -23,6 +23,7 @@
 #include <jsonrpccpp/common/exception.h>
 #include <libdevcrypto/Common.h>
 #include <libethcore/CommonJS.h>
+#include <libinitializer/LedgerInitializer.h>
 #include <librpc/Rpc.h>
 #include <test/tools/libutils/Common.h>
 #include <test/tools/libutils/TestOutputHelper.h>
@@ -32,6 +33,8 @@ using namespace jsonrpc;
 using namespace dev;
 using namespace dev::rpc;
 using namespace dev::ledger;
+using namespace dev::initializer;
+using namespace dev::test;
 
 namespace dev
 {
@@ -45,14 +48,17 @@ public:
         m_service = std::make_shared<FakesService>();
         std::string configurationPath =
             getTestPath().string() + "/fisco-bcos-data/group.10.genesis";
+
         m_ledgerManager = std::make_shared<LedgerManager>();
+        m_ledgerInitializer = std::make_shared<LedgerInitializer>();
+        m_ledgerInitializer->setLedgerManager(m_ledgerManager);
         std::shared_ptr<LedgerInterface> ledger =
             std::make_shared<FakeLedger>(m_service, groupId, m_keyPair, "", configurationPath);
         auto ledgerParams = std::make_shared<LedgerParam>();
         ledgerParams->init(configurationPath);
         ledger->initLedger(ledgerParams);
         m_ledgerManager->insertLedger(groupId, ledger);
-        rpc = std::make_shared<Rpc>(m_ledgerManager, m_service);
+        rpc = std::make_shared<Rpc>(m_ledgerInitializer, m_service);
     }
 
 public:
@@ -60,6 +66,7 @@ public:
     KeyPair m_keyPair = KeyPair::create();
     std::shared_ptr<FakesService> m_service;
     std::shared_ptr<LedgerManager> m_ledgerManager;
+    LedgerInitializer::Ptr m_ledgerInitializer;
 
     std::string clientVersion = "2.0";
     std::string listenIp = "127.0.0.1";
@@ -69,9 +76,14 @@ public:
     dev::GROUP_ID invalidGroup = 2;
 };
 
-BOOST_FIXTURE_TEST_SUITE(RpcTest, RpcTestFixure)
-#ifdef FISCO_GM
-BOOST_AUTO_TEST_CASE(GM_testConsensusPart)
+class SM_RpcTestFixure : public SM_CryptoTestFixture, public RpcTestFixure
+{
+public:
+    SM_RpcTestFixure() : SM_CryptoTestFixture(), RpcTestFixure() {}
+};
+
+BOOST_FIXTURE_TEST_SUITE(SM_RpcTest, SM_RpcTestFixure)
+BOOST_AUTO_TEST_CASE(SM_testConsensusPart)
 {
     std::string blockNumber = rpc->getBlockNumber(groupId);
     BOOST_CHECK(blockNumber == "0x0");
@@ -85,14 +97,14 @@ BOOST_AUTO_TEST_CASE(GM_testConsensusPart)
     BOOST_CHECK_THROW(rpc->getConsensusStatus(invalidGroup), JsonRpcException);
 }
 
-BOOST_AUTO_TEST_CASE(GM_testSyncPart)
+BOOST_AUTO_TEST_CASE(SM_testSyncPart)
 {
     Json::Value status = rpc->getSyncStatus(groupId);
     BOOST_CHECK(status.size() == 9);
     BOOST_CHECK_THROW(rpc->getSyncStatus(invalidGroup), JsonRpcException);
 }
 
-BOOST_AUTO_TEST_CASE(GM_testP2pPart)
+BOOST_AUTO_TEST_CASE(SM_testP2pPart)
 {
     Json::Value version = rpc->getClientVersion();
     BOOST_CHECK(version.size() != 0);
@@ -109,14 +121,14 @@ BOOST_AUTO_TEST_CASE(GM_testP2pPart)
     BOOST_CHECK(response.size() == 0);
 }
 
-BOOST_AUTO_TEST_CASE(GM_testGetBlockByHash)
+BOOST_AUTO_TEST_CASE(SM_testGetBlockByHash)
 {
-    std::string blockHash = "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e";
+    std::string blockHash = "0xa5529e6035e28f69977bb893888d338b9f76f023124216484e4056219d4e7e68";
     Json::Value response = rpc->getBlockByHash(groupId, blockHash, true);
-
-    BOOST_CHECK(response["number"].asString() == "0x0");
-    BOOST_CHECK(response["hash"].asString() ==
-                "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e");
+    std::cout << "* SM_testGetBlockByHash: block number" << response["number"] << std::endl;
+    std::cout << "* SM_testGetBlockByHash: block hash" << response["hash"] << std::endl;
+    BOOST_CHECK(response["number"].asString() == "0x0" || response["number"].asString() == "0");
+    BOOST_CHECK(response["hash"].asString() == blockHash);
     BOOST_CHECK(response["sealer"].asString() == "0x1");
     BOOST_CHECK(response["extraData"][0].asString() == "0x0a");
     BOOST_CHECK(response["gasLimit"].asString() == "0x9");
@@ -152,7 +164,7 @@ BOOST_AUTO_TEST_CASE(GM_testGetBlockByHash)
 
     BOOST_CHECK(response["transactions"][0]["value"].asString() == "0x0");
     BOOST_CHECK(response["transactions"][0]["blockHash"].asString() ==
-                "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e");
+                "0xa5529e6035e28f69977bb893888d338b9f76f023124216484e4056219d4e7e68");
     BOOST_CHECK(response["transactions"][0]["transactionIndex"].asString() == "0x0");
     BOOST_CHECK(response["transactions"][0]["blockNumber"].asString() == "0x0");
 
@@ -169,14 +181,14 @@ BOOST_AUTO_TEST_CASE(GM_testGetBlockByHash)
     }
 
     BOOST_CHECK_THROW(rpc->getBlockByHash(invalidGroup, blockHash, false), JsonRpcException);
-    blockHash = "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e0755480070";
+    blockHash = "0x9319b663d2982b6d3894b455757843b5b68ca84a94356eebccdfa6d1eb34d680";
     BOOST_CHECK_THROW(rpc->getBlockByHash(groupId, blockHash, false), JsonRpcException);
 }
-BOOST_AUTO_TEST_CASE(GM_getBlockByNumber)
+BOOST_AUTO_TEST_CASE(SM_getBlockByNumber)
 {
     Json::Value response = rpc->getBlockByNumber(groupId, "0x0", true);
 
-    BOOST_CHECK(response["number"].asString() == "0x0");
+    BOOST_CHECK(response["number"].asString() == "0x0" || response["number"].asString() == "0");
     BOOST_CHECK_EQUAL(response["hash"].asString(),
         "0xa5529e6035e28f69977bb893888d338b9f76f023124216484e4056219d4e7e68");
     BOOST_CHECK(response["sealer"].asString() == "0x1");
@@ -232,21 +244,21 @@ BOOST_AUTO_TEST_CASE(GM_getBlockByNumber)
     BOOST_CHECK_THROW(rpc->getBlockByNumber(invalidGroup, "0x0", false), JsonRpcException);
 }
 
-BOOST_AUTO_TEST_CASE(GM_testGetBlockHashByNumber)
+BOOST_AUTO_TEST_CASE(SM_testGetBlockHashByNumber)
 {
     std::string blockNumber = "0x0";
     std::string response = rpc->getBlockHashByNumber(groupId, blockNumber);
-    BOOST_CHECK(response == "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e");
+    BOOST_CHECK(response == "0xa5529e6035e28f69977bb893888d338b9f76f023124216484e4056219d4e7e68");
 
     BOOST_CHECK_THROW(rpc->getBlockHashByNumber(invalidGroup, blockNumber), JsonRpcException);
 }
 
-BOOST_AUTO_TEST_CASE(GM_testGetTransactionByHash)
+BOOST_AUTO_TEST_CASE(SM_testGetTransactionByHash)
 {
-    std::string txHash = "0x7536cf1286b5ce6c110cd4fea5c891467884240c9af366d678eb4191e1c31c6f";
+    std::string txHash = "0xe1054f38907ab3bef251caf8cbd8b25e779a40445b8dd4fcf15fce917d3e4ebe";
     Json::Value response = rpc->getTransactionByHash(groupId, txHash);
     BOOST_CHECK(response["hash"].asString() ==
-                "0x7536cf1286b5ce6c110cd4fea5c891467884240c9af366d678eb4191e1c31c6f");
+                "0xe1054f38907ab3bef251caf8cbd8b25e779a40445b8dd4fcf15fce917d3e4ebe");
     BOOST_CHECK(response["blockNumber"].asString() == "0x0");
     if (g_BCOSConfig.version() == RC1_VERSION)
     {
@@ -274,14 +286,14 @@ BOOST_AUTO_TEST_CASE(GM_testGetTransactionByHash)
     BOOST_CHECK_THROW(rpc->getTransactionByHash(invalidGroup, txHash), JsonRpcException);
 }
 
-BOOST_AUTO_TEST_CASE(GM_testGetTransactionByBlockHashAndIndex)
+BOOST_AUTO_TEST_CASE(SM_testGetTransactionByBlockHashAndIndex)
 {
-    std::string blockHash = "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e";
+    std::string blockHash = "0xa5529e6035e28f69977bb893888d338b9f76f023124216484e4056219d4e7e68";
     std::string index = "0x0";
     Json::Value response = rpc->getTransactionByBlockHashAndIndex(groupId, blockHash, index);
 
     BOOST_CHECK(response["blockHash"].asString() ==
-                "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e");
+                "0xa5529e6035e28f69977bb893888d338b9f76f023124216484e4056219d4e7e68");
     BOOST_CHECK(response["blockNumber"].asString() == "0x0");
     if (g_BCOSConfig.version() == RC1_VERSION)
     {
@@ -321,7 +333,7 @@ BOOST_AUTO_TEST_CASE(GM_testGetTransactionByBlockHashAndIndex)
         rpc->getTransactionByBlockHashAndIndex(invalidGroup, blockHash, index), JsonRpcException);
 }
 
-BOOST_AUTO_TEST_CASE(GM_testGetTransactionByBlockNumberAndIndex)
+BOOST_AUTO_TEST_CASE(SM_testGetTransactionByBlockNumberAndIndex)
 {
     std::string blockNumber = "1";
     std::string index = "0x0";
@@ -364,17 +376,17 @@ BOOST_AUTO_TEST_CASE(GM_testGetTransactionByBlockNumberAndIndex)
         rpc->getTransactionByBlockHashAndIndex(groupId, blockNumber, index), JsonRpcException);
 }
 
-BOOST_AUTO_TEST_CASE(GM_testGetTransactionReceipt)
+BOOST_AUTO_TEST_CASE(SM_testGetTransactionReceipt)
 {
-    std::string txHash = "0x7536cf1286b5ce6c110cd4fea5c891467884240c9af366d678eb4191e1c31c6f";
+    std::string txHash = "0xe1054f38907ab3bef251caf8cbd8b25e779a40445b8dd4fcf15fce917d3e4ebe";
     Json::Value response = rpc->getTransactionReceipt(groupId, txHash);
 
     BOOST_CHECK(response["transactionHash"].asString() ==
-                "0x7536cf1286b5ce6c110cd4fea5c891467884240c9af366d678eb4191e1c31c6f");
+                "0xe1054f38907ab3bef251caf8cbd8b25e779a40445b8dd4fcf15fce917d3e4ebe");
     BOOST_CHECK(response["transactionIndex"].asString() == "0x0");
     BOOST_CHECK(response["blockNumber"].asString() == "0x0");
     BOOST_CHECK(response["blockHash"].asString() ==
-                "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e");
+                "0xa5529e6035e28f69977bb893888d338b9f76f023124216484e4056219d4e7e68");
     if (g_BCOSConfig.version() == RC1_VERSION)
     {
         BOOST_CHECK_EQUAL(
@@ -398,7 +410,7 @@ BOOST_AUTO_TEST_CASE(GM_testGetTransactionReceipt)
 
     BOOST_CHECK_THROW(rpc->getTransactionReceipt(invalidGroup, txHash), JsonRpcException);
 }
-BOOST_AUTO_TEST_CASE(GM_testGetpendingTransactions)
+BOOST_AUTO_TEST_CASE(SM_testGetpendingTransactions)
 {
     Json::Value response = rpc->getPendingTransactions(groupId);
 
@@ -424,11 +436,11 @@ BOOST_AUTO_TEST_CASE(GM_testGetpendingTransactions)
             "0x3eebc46c9c0e3b84799097c5a6ccd6657a9295c11270407707366d0750fcd59");
     }
     BOOST_CHECK(response[0]["value"].asString() == "0x0");
-
-    BOOST_CHECK_THROW(rpc->getPendingTransactions(invalidGroup), JsonRpcException);
+    // no need to avoid getPendingTransactions for the node that doesn't belong to the group
+    // BOOST_CHECK_THROW(rpc->getPendingTransactions(invalidGroup), JsonRpcException);
 }
 
-BOOST_AUTO_TEST_CASE(GM_testGetCode)
+BOOST_AUTO_TEST_CASE(SM_testGetCode)
 {
     std::string address = "0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b";
     std::string response = rpc->getCode(groupId, address);
@@ -437,7 +449,7 @@ BOOST_AUTO_TEST_CASE(GM_testGetCode)
     BOOST_CHECK_THROW(rpc->getCode(invalidGroup, address), JsonRpcException);
 }
 
-BOOST_AUTO_TEST_CASE(GM_testGetTotalTransactionCount)
+BOOST_AUTO_TEST_CASE(SM_testGetTotalTransactionCount)
 {
     Json::Value response = rpc->getTotalTransactionCount(groupId);
     BOOST_CHECK(response["txSum"].asString() == "0x0");
@@ -446,11 +458,11 @@ BOOST_AUTO_TEST_CASE(GM_testGetTotalTransactionCount)
     BOOST_CHECK_THROW(rpc->getTotalTransactionCount(invalidGroup), JsonRpcException);
 }
 
-BOOST_AUTO_TEST_CASE(GM_testCall)
+BOOST_AUTO_TEST_CASE(SM_testCall)
 {
     Json::Value request;
-    request["from"] = "0x" + toHex(toAddress(KeyPair::create().pub()));
-    request["to"] = "0x" + toHex(toAddress(KeyPair::create().pub()));
+    request["from"] = toHexPrefixed(toAddress(KeyPair::create().pub()));
+    request["to"] = toHexPrefixed(toAddress(KeyPair::create().pub()));
     request["value"] = "0x1";
     request["gas"] = "0x12";
     request["gasPrice"] = "0x1";
@@ -466,9 +478,8 @@ BOOST_AUTO_TEST_CASE(GM_testCall)
     BOOST_CHECK_THROW(rpc->call(invalidGroup, request), JsonRpcException);
 }
 
-BOOST_AUTO_TEST_CASE(GM_testSendRawTransaction)
+BOOST_AUTO_TEST_CASE(SM_testSendRawTransaction)
 {
-#ifdef FISCO_GM
     std::string rlpStr =
         "f901309f65f0d06e39dc3c08e32ac10a5070858962bc6c0f5760baca823f2d5582d14485174876e7ff8609"
         "184e729fff8204a294d6f1a71052366dbae2f7ab2d5d5845e77965cf0d80b86448f85bce00000000000000"
@@ -489,15 +500,6 @@ BOOST_AUTO_TEST_CASE(GM_testSendRawTransaction)
             "16d87c5065ad5c3b110ef0b97fe9a67b62443cb8ddde60d4e001a64429dc6ea03d2569e0449e9a900c2365"
             "41afb9d8a8d5e1a36844439c7076f6e75ed624256f";
     }
-#else
-    std::string rlpStr =
-        "f8ef9f65f0d06e39dc3c08e32ac10a5070858962bc6c0f5760baca823f2d5582d03f85174876e7ff"
-        "8609184e729fff82020394d6f1a71052366dbae2f7ab2d5d5845e77965cf0d80b86448f85bce000000"
-        "000000000000000000000000000000000000000000000000000000001bf5bd8a9e7ba8b936ea704292"
-        "ff4aaa5797bf671fdc8526dcd159f23c1f5a05f44e9fa862834dc7cb4541558f2b4961dc39eaaf0af7"
-        "f7395028658d0e01b86a371ca00b2b3fabd8598fefdda4efdb54f626367fc68e1735a8047f0f1c4f84"
-        "0255ca1ea0512500bc29f4cfe18ee1c88683006d73e56c934100b8abf4d2334560e1d2f75e";
-#endif
 
     std::string response = rpc->sendRawTransaction(groupId, rlpStr);
 
@@ -514,7 +516,9 @@ BOOST_AUTO_TEST_CASE(GM_testSendRawTransaction)
 
     BOOST_CHECK_THROW(rpc->sendRawTransaction(invalidGroup, rlpStr), JsonRpcException);
 }
-#else
+BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_FIXTURE_TEST_SUITE(RpcTest, RpcTestFixure)
 BOOST_AUTO_TEST_CASE(testSystemConfig)
 {
     std::string value = rpc->getSystemConfigByKey(groupId, "tx_gas_limit");
@@ -542,6 +546,13 @@ BOOST_AUTO_TEST_CASE(testConsensusPart)
     Json::Value observerList = rpc->getObserverList(groupId);
     BOOST_CHECK(observerList.size() == 0);
     BOOST_CHECK_THROW(rpc->getObserverList(invalidGroup), JsonRpcException);
+
+    // test getEpochSealersList
+    BOOST_CHECK_THROW(rpc->getEpochSealersList(invalidGroup), JsonRpcException);
+    auto param = m_ledgerManager->getParamByGroupId(groupId);
+    param->mutableConsensusParam().consensusType = "rpbft";
+    BOOST_CHECK((rpc->getEpochSealersList(groupId)).size() == 1);
+    param->mutableConsensusParam().consensusType = "pbft";
 }
 
 BOOST_AUTO_TEST_CASE(testSyncPart)
@@ -573,12 +584,11 @@ BOOST_AUTO_TEST_CASE(testP2pPart)
 
 BOOST_AUTO_TEST_CASE(testGetBlockByHash)
 {
-    std::string blockHash = "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e";
+    std::string blockHash = "0xba6e71fbc207e776c74b66bc031d1a599d5b35cd03fd9f5e2331fa5ecdccdc87";
     Json::Value response = rpc->getBlockByHash(groupId, blockHash, true);
-
-    BOOST_CHECK(response["number"].asString() == "0x0");
+    BOOST_CHECK(response["number"].asString() == "0x0" || response["number"].asString() == "0");
     BOOST_CHECK(response["hash"].asString() ==
-                "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e");
+                "0xba6e71fbc207e776c74b66bc031d1a599d5b35cd03fd9f5e2331fa5ecdccdc87");
     BOOST_CHECK(response["sealer"].asString() == "0x1");
     BOOST_CHECK(response["extraData"][0].asString() == "0x0a");
     BOOST_CHECK(response["gasLimit"].asString() == "0x9");
@@ -614,7 +624,7 @@ BOOST_AUTO_TEST_CASE(testGetBlockByHash)
 
     BOOST_CHECK(response["transactions"][0]["value"].asString() == "0x0");
     BOOST_CHECK(response["transactions"][0]["blockHash"].asString() ==
-                "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e");
+                "0xba6e71fbc207e776c74b66bc031d1a599d5b35cd03fd9f5e2331fa5ecdccdc87");
     BOOST_CHECK(response["transactions"][0]["transactionIndex"].asString() == "0x0");
     BOOST_CHECK(response["transactions"][0]["blockNumber"].asString() == "0x0");
 
@@ -634,11 +644,10 @@ BOOST_AUTO_TEST_CASE(testGetBlockByHash)
     blockHash = "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e0755480070";
     BOOST_CHECK_THROW(rpc->getBlockByHash(groupId, blockHash, false), JsonRpcException);
 }
-BOOST_AUTO_TEST_CASE(getBlockByNumber)
-{
-    Json::Value response = rpc->getBlockByNumber(groupId, "0x0", true);
 
-    BOOST_CHECK(response["number"].asString() == "0x0");
+void checkHeaderByNumber(Json::Value const& response)
+{
+    BOOST_CHECK(response["number"].asString() == "0x0" || response["number"].asString() == "0");
     BOOST_CHECK(response["hash"].asString() ==
                 "0xba6e71fbc207e776c74b66bc031d1a599d5b35cd03fd9f5e2331fa5ecdccdc87");
     BOOST_CHECK(response["sealer"].asString() == "0x1");
@@ -646,6 +655,33 @@ BOOST_AUTO_TEST_CASE(getBlockByNumber)
     BOOST_CHECK(response["gasLimit"].asString() == "0x9");
     BOOST_CHECK(response["gasUsed"].asString() == "0x8");
     BOOST_CHECK(response["timestamp"].asString() == "0x9");
+}
+
+BOOST_AUTO_TEST_CASE(getBlockHeader)
+{
+    BOOST_CHECK_THROW(rpc->getBlockHeaderByNumber(invalidGroup, "0x0", false), JsonRpcException);
+    auto blockHash = "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e";
+    BOOST_CHECK_THROW(rpc->getBlockHeaderByHash(invalidGroup, blockHash, true), JsonRpcException);
+    BOOST_CHECK_THROW(rpc->getBlockHeaderByHash(groupId, blockHash, true), JsonRpcException);
+
+    // check normal case
+    auto response = rpc->getBlockHeaderByNumber(groupId, "0x0", true);
+    checkHeaderByNumber(response);
+
+    auto hash = "0xba6e71fbc207e776c74b66bc031d1a599d5b35cd03fd9f5e2331fa5ecdccdc87";
+    response = rpc->getBlockHeaderByHash(groupId, hash, true);
+    BOOST_CHECK(response["number"].asString() == "0");
+    BOOST_CHECK(response["sealer"].asString() == "0x1");
+    BOOST_CHECK(response["extraData"][0].asString() == "0x0a");
+    BOOST_CHECK(response["gasLimit"].asString() == "0x9");
+    BOOST_CHECK(response["gasUsed"].asString() == "0x8");
+    BOOST_CHECK(response["timestamp"].asString() == "0x9");
+}
+
+BOOST_AUTO_TEST_CASE(getBlockByNumber)
+{
+    Json::Value response = rpc->getBlockByNumber(groupId, "0x0", true);
+    checkHeaderByNumber(response);
 
     if (g_BCOSConfig.version() == RC1_VERSION)
     {
@@ -698,7 +734,7 @@ BOOST_AUTO_TEST_CASE(testGetBlockHashByNumber)
 {
     std::string blockNumber = "0x0";
     std::string response = rpc->getBlockHashByNumber(groupId, blockNumber);
-    BOOST_CHECK(response == "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e");
+    BOOST_CHECK(response == "0xba6e71fbc207e776c74b66bc031d1a599d5b35cd03fd9f5e2331fa5ecdccdc87");
 
     BOOST_CHECK_THROW(rpc->getBlockHashByNumber(invalidGroup, blockNumber), JsonRpcException);
 }
@@ -743,12 +779,12 @@ BOOST_AUTO_TEST_CASE(testGetTransactionByHash)
 
 BOOST_AUTO_TEST_CASE(testGetTransactionByBlockHashAndIndex)
 {
-    std::string blockHash = "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e";
+    std::string blockHash = "0xba6e71fbc207e776c74b66bc031d1a599d5b35cd03fd9f5e2331fa5ecdccdc87";
     std::string index = "0x0";
     Json::Value response = rpc->getTransactionByBlockHashAndIndex(groupId, blockHash, index);
 
     BOOST_CHECK(response["blockHash"].asString() ==
-                "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e");
+                "0xba6e71fbc207e776c74b66bc031d1a599d5b35cd03fd9f5e2331fa5ecdccdc87");
     BOOST_CHECK(response["blockNumber"].asString() == "0x0");
     if (g_BCOSConfig.version() == RC1_VERSION)
     {
@@ -829,15 +865,15 @@ BOOST_AUTO_TEST_CASE(testGetTransactionByBlockNumberAndIndex)
 
 BOOST_AUTO_TEST_CASE(testGetTransactionReceipt)
 {
-    std::string txHash = "0x7536cf1286b5ce6c110cd4fea5c891467884240c9af366d678eb4191e1c31c6f";
+    std::string txHash = "0x0accad4228274b0d78939f48149767883a6e99c95941baa950156e926f1c96ba";
     Json::Value response = rpc->getTransactionReceipt(groupId, txHash);
 
     BOOST_CHECK(response["transactionHash"].asString() ==
-                "0x7536cf1286b5ce6c110cd4fea5c891467884240c9af366d678eb4191e1c31c6f");
+                "0x0accad4228274b0d78939f48149767883a6e99c95941baa950156e926f1c96ba");
     BOOST_CHECK(response["transactionIndex"].asString() == "0x0");
     BOOST_CHECK(response["blockNumber"].asString() == "0x0");
     BOOST_CHECK(response["blockHash"].asString() ==
-                "0x067150c07dab4facb7160e075548007e067150c07dab4facb7160e075548007e");
+                "0xba6e71fbc207e776c74b66bc031d1a599d5b35cd03fd9f5e2331fa5ecdccdc87");
     if (g_BCOSConfig.version() == RC1_VERSION)
     {
         BOOST_CHECK(response["from"].asString() == "0x6bc952a2e4db9c0c86a368d83e9df0c6ab481102");
@@ -883,14 +919,16 @@ BOOST_AUTO_TEST_CASE(testGetPendingTransactions)
     }
     BOOST_CHECK(response[0]["value"].asString() == "0x0");
 
-    BOOST_CHECK_THROW(rpc->getPendingTransactions(invalidGroup), JsonRpcException);
+    // no need to check the node in the group or not
+    // BOOST_CHECK_THROW(rpc->getPendingTransactions(invalidGroup), JsonRpcException);
 }
 BOOST_AUTO_TEST_CASE(testGetPendingTxSize)
 {
     std::string response = rpc->getPendingTxSize(groupId);
     BOOST_CHECK(response == "0x1");
 
-    BOOST_CHECK_THROW(rpc->getPendingTxSize(invalidGroup), JsonRpcException);
+    // no need to check the node in the group or not
+    // BOOST_CHECK_THROW(rpc->getPendingTxSize(invalidGroup), JsonRpcException);
 }
 
 BOOST_AUTO_TEST_CASE(testGetCode)
@@ -915,8 +953,8 @@ BOOST_AUTO_TEST_CASE(testGetTotalTransactionCount)
 BOOST_AUTO_TEST_CASE(testCall)
 {
     Json::Value request;
-    request["from"] = "0x" + toHex(toAddress(KeyPair::create().pub()));
-    request["to"] = "0x" + toHex(toAddress(KeyPair::create().pub()));
+    request["from"] = toHexPrefixed(toAddress(KeyPair::create().pub()));
+    request["to"] = toHexPrefixed(toAddress(KeyPair::create().pub()));
     request["value"] = "0x1";
     request["gas"] = "0x12";
     request["gasPrice"] = "0x1";
@@ -934,17 +972,6 @@ BOOST_AUTO_TEST_CASE(testCall)
 
 BOOST_AUTO_TEST_CASE(testSendRawTransaction)
 {
-#ifdef FISCO_GM
-    std::string rlpStr =
-        "f901309f65f0d06e39dc3c08e32ac10a5070858962bc6c0f5760baca823f2d5582d14485174876e7ff8609"
-        "184e729fff8204a294d6f1a71052366dbae2f7ab2d5d5845e77965cf0d80b86448f85bce00000000000000"
-        "0000000000000000000000000000000000000000000000001bf5bd8a9e7ba8b936ea704292ff4aaa5797bf"
-        "671fdc8526dcd159f23c1f5a05f44e9fa862834dc7cb4541558f2b4961dc39eaaf0af7f7395028658d0e01"
-        "b86a37b840c7ca78e7ab80ee4be6d3936ba8e899d8fe12c12114502956ebe8c8629d36d88481dec9973574"
-        "2ea523c88cf3becba1cc4375bc9e225143fe1e8e43abc8a7c493a0ba3ce8383b7c91528bede9cf890b4b1e"
-        "9b99c1d8e56d6f8292c827470a606827a0ed511490a1666791b2bd7fc4f499eb5ff18fb97ba68ff9aee206"
-        "8fd63b88e817";
-#else
     std::string rlpStr =
         "f8ef9f65f0d06e39dc3c08e32ac10a5070858962bc6c0f5760baca823f2d5582d03f85174876e7ff"
         "8609184e729fff82020394d6f1a71052366dbae2f7ab2d5d5845e77965cf0d80b86448f85bce000000"
@@ -961,15 +988,17 @@ BOOST_AUTO_TEST_CASE(testSendRawTransaction)
             "00000000000000000000000000000000041ba08e0d3fae10412c584c977721aeda88df932b2a019f084fed"
             "a1e0a42d199ea979a016c387f79eb85078be5db40abe1670b8b480a12c7eab719bedee212b7972f775";
     }
-#endif
 
     std::string response = rpc->sendRawTransaction(groupId, rlpStr);
 
     BOOST_CHECK(response == "0x0accad4228274b0d78939f48149767883a6e99c95941baa950156e926f1c96ba");
 
+    response = rpc->sendRawTransactionAndGetProof(groupId, rlpStr);
+    BOOST_CHECK(response == "0x0accad4228274b0d78939f48149767883a6e99c95941baa950156e926f1c96ba");
+
     BOOST_CHECK_THROW(rpc->sendRawTransaction(invalidGroup, rlpStr), JsonRpcException);
+    BOOST_CHECK_THROW(rpc->sendRawTransactionAndGetProof(invalidGroup, rlpStr), JsonRpcException);
 }
-#endif
 BOOST_AUTO_TEST_SUITE_END()
 }  // namespace test
 }  // namespace dev

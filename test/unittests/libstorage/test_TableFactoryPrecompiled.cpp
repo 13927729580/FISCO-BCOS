@@ -22,6 +22,7 @@
 #include <libethcore/ABI.h>
 #include <libprecompiled/TableFactoryPrecompiled.h>
 #include <libstorage/MemoryTableFactory.h>
+#include <libstorage/MemoryTableFactory2.h>
 #include <libstorage/Storage.h>
 #include <libstorage/Table.h>
 #include <boost/test/unit_test.hpp>
@@ -51,16 +52,23 @@ struct TableFactoryPrecompiledFixture
         context = std::make_shared<MockPrecompiledEngine>();
         BlockInfo blockInfo{h256(0x001), 1, h256(0x001)};
         context->setBlockInfo(blockInfo);
-        tableFactoryPrecompiled = std::make_shared<dev::blockverifier::TableFactoryPrecompiled>();
+        context->setMemoryTableFactory(std::make_shared<storage::MemoryTableFactory2>());
+        tableFactoryPrecompiled = std::make_shared<dev::precompiled::TableFactoryPrecompiled>();
         memStorage = std::make_shared<MemoryStorage>();
         auto mockMemoryTableFactory = std::make_shared<MockMemoryTableFactory>();
         mockMemoryTableFactory->setStateStorage(memStorage);
         tableFactoryPrecompiled->setMemoryTableFactory(mockMemoryTableFactory);
+
+        auto precompiledGasFactory = std::make_shared<dev::precompiled::PrecompiledGasFactory>(0);
+        auto precompiledExecResultFactory =
+            std::make_shared<dev::precompiled::PrecompiledExecResultFactory>();
+        precompiledExecResultFactory->setPrecompiledGasFactory(precompiledGasFactory);
+        tableFactoryPrecompiled->setPrecompiledExecResultFactory(precompiledExecResultFactory);
     }
 
     ~TableFactoryPrecompiledFixture() {}
     Storage::Ptr memStorage;
-    dev::blockverifier::TableFactoryPrecompiled::Ptr tableFactoryPrecompiled;
+    dev::precompiled::TableFactoryPrecompiled::Ptr tableFactoryPrecompiled;
     ExecutiveContext::Ptr context;
     int addressCount = 0x10000;
 };
@@ -78,7 +86,8 @@ BOOST_AUTO_TEST_CASE(call_afterBlock)
     dev::eth::ContractABI abi;
     bytes param = abi.abiIn("createTable(string,string,string)", std::string("t_test"),
         std::string("id"), std::string("item_name,item_id"));
-    bytes out = tableFactoryPrecompiled->call(context, bytesConstRef(&param));
+    auto callResult = tableFactoryPrecompiled->call(context, bytesConstRef(&param));
+    bytes out = callResult->execResult();
     s256 errCode;
     abi.abiOut(&out, errCode);
     BOOST_TEST(errCode == 0);
@@ -86,7 +95,8 @@ BOOST_AUTO_TEST_CASE(call_afterBlock)
     // createTable exist
     param = abi.abiIn("createTable(string,string,string)", std::string("t_test"), std::string("id"),
         std::string("item_name,item_id"));
-    out = tableFactoryPrecompiled->call(context, bytesConstRef(&param));
+    callResult = tableFactoryPrecompiled->call(context, bytesConstRef(&param));
+    out = callResult->execResult();
     abi.abiOut(&out, errCode);
     if (g_BCOSConfig.version() > RC2_VERSION)
     {
@@ -101,7 +111,8 @@ BOOST_AUTO_TEST_CASE(call_afterBlock)
     param.clear();
     out.clear();
     param = abi.abiIn("openTable(string)", std::string("t_poor"));
-    out = tableFactoryPrecompiled->call(context, bytesConstRef(&param));
+    callResult = tableFactoryPrecompiled->call(context, bytesConstRef(&param));
+    out = callResult->execResult();
     Address addressOut;
     addressOut.clear();
     abi.abiOut(&out, addressOut);
@@ -110,7 +121,8 @@ BOOST_AUTO_TEST_CASE(call_afterBlock)
     param.clear();
     out.clear();
     param = abi.abiIn("openTable(string)", std::string("t_test"));
-    out = tableFactoryPrecompiled->call(context, bytesConstRef(&param));
+    callResult = tableFactoryPrecompiled->call(context, bytesConstRef(&param));
+    out = callResult->execResult();
     addressOut.clear();
     abi.abiOut(&out, addressOut);
     BOOST_TEST(addressOut == Address(++addressCount));

@@ -21,10 +21,11 @@
  * @date 2018-09-05
  */
 #include "FakeExtVMFace.h"
-#include <libevm/EVMC.h>
-#include <libevm/VMFace.h>
-#include <libevm/VMFactory.h>
-#include <libinterpreter/interpreter.h>
+#include "libdevcrypto/CryptoInterface.h"
+#include <libexecutive/EVMInstance.h>
+#include <libexecutive/EVMInterface.h>
+#include <libexecutive/VMFactory.h>
+// #include <libinterpreter/interpreter.h>
 #include <test/tools/libbcos/Options.h>
 #include <test/tools/libutils/TestOutputHelper.h>
 #include <boost/test/unit_test.hpp>
@@ -39,17 +40,21 @@ BOOST_FIXTURE_TEST_SUITE(VMFaceTest, TestOutputHelperFixture)
 
 BOOST_AUTO_TEST_CASE(testInterpreterEvmC)
 {
-    std::string code_str = "ExtVMFace Test";
+    std::string code_str = "EVMHostInterface Test";
     bytes code(code_str.begin(), code_str.end());
     u256 gasUsed = u256(300000);
     u256 gasLimit = u256(300000);
     EnvInfo env_info = InitEnvInfo::createEnvInfo(gasUsed, gasLimit);
     CallParameters param = InitCallParams::createRandomCallParams();
     FakeExtVM fake_ext_vm(env_info, param.codeAddress, param.senderAddress, param.senderAddress,
-        param.valueTransfer, param.gas, param.data, code, sha3(code_str), 0, false, true);
-    std::unique_ptr<VMFace> m_face = VMFactory::create(VMKind::Interpreter);
-    u256 io_gas = u256(200000);
-    BOOST_CHECK_NO_THROW(m_face->exec(io_gas, fake_ext_vm, OnOpFunc{}));
+        param.valueTransfer, param.gas, param.data, code, crypto::Hash(code_str), 0, false, true);
+    std::unique_ptr<EVMInterface> m_face = VMFactory::create(VMKind::evmone);
+    auto io_gas = 200000;
+    evmc_message msg;
+    msg.gas = io_gas;
+    evmc_revision revision = EVMC_HOMESTEAD;
+    auto result = m_face->exec(fake_ext_vm, revision, &msg, code.data(), code.size());
+    BOOST_TEST(result->status() == EVMC_BAD_JUMP_DESTINATION);
 }
 
 BOOST_AUTO_TEST_CASE(testVMOptionParser)
@@ -84,6 +89,8 @@ BOOST_AUTO_TEST_CASE(testToRevision)
     BOOST_CHECK(EVMC_BYZANTIUM == toRevision(schedule));
     schedule.haveCreate2 = true;
     BOOST_CHECK(EVMC_CONSTANTINOPLE == toRevision(schedule));
+    schedule.enableIstanbul = true;
+    BOOST_CHECK(EVMC_ISTANBUL == toRevision(schedule));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

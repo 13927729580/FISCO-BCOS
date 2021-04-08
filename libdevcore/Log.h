@@ -29,6 +29,7 @@
 
 // BCOS log format
 #define LOG_BADGE(_NAME) "[" << (_NAME) << "]"
+#define LOG_TYPE(_TYPE) (_TYPE) << "|"
 #define LOG_DESC(_DESCRIPTION) (_DESCRIPTION)
 #define LOG_KV(_K, _V) "," << (_K) << "=" << (_V)
 
@@ -40,6 +41,12 @@ extern boost::log::sources::severity_channel_logger_mt<boost::log::trivial::seve
     std::string>
     FileLoggerHandler;
 
+// the statFileLogger
+extern std::string const StatFileLogger;
+extern boost::log::sources::severity_channel_logger_mt<boost::log::trivial::severity_level,
+    std::string>
+    StatFileLoggerHandler;
+
 enum LogLevel
 {
     FATAL = boost::log::trivial::fatal,
@@ -50,7 +57,19 @@ enum LogLevel
     TRACE = boost::log::trivial::trace
 };
 
-#define LOG(level)                        \
-    BOOST_LOG_SEV(dev::FileLoggerHandler, \
+extern LogLevel c_fileLogLevel;
+extern LogLevel c_statLogLevel;
+
+void setFileLogLevel(LogLevel const& _level);
+void setStatLogLevel(LogLevel const& _level);
+
+#define LOG(level)                                   \
+    if (dev::LogLevel::level >= dev::c_fileLogLevel) \
+    BOOST_LOG_SEV(dev::FileLoggerHandler,            \
+        (boost::log::v2s_mt_posix::trivial::severity_level)(dev::LogLevel::level))
+
+#define STAT_LOG(level)                              \
+    if (dev::LogLevel::level >= dev::c_statLogLevel) \
+    BOOST_LOG_SEV(dev::StatFileLoggerHandler,        \
         (boost::log::v2s_mt_posix::trivial::severity_level)(dev::LogLevel::level))
 }  // namespace dev

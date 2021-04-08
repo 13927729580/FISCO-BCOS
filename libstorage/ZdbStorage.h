@@ -55,6 +55,7 @@ public:
     void setConnPool(std::shared_ptr<SQLConnectionPool>& _connPool);
     void SetSqlAccess(SQLBasicAccess::Ptr _sqlBasicAcc);
     void initSysTables();
+    void setMaxRetry(int maxRetry) { m_maxRetry = maxRetry; }
 
 private:
     std::function<void(std::exception&)> m_fatalHandler;
@@ -74,6 +75,12 @@ private:
     void createSysConfigTables();
     void createSysBlock2NoncesTables();
     void insertSysTables();
+    // create blob table
+    void createBlobSysHash2BlockHeaderTable();
+
+    int m_maxRetry = 60;
+    std::string m_rowFormat = "";
+    std::string m_valueFieldType = "longtext";
 };
 
 }  // namespace storage

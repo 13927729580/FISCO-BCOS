@@ -67,6 +67,7 @@ public:
         createPBFTMsgFactory();
         m_blockFactory = std::make_shared<dev::eth::BlockFactory>();
         m_reqCache = std::make_shared<PBFTReqCache>();
+        m_reqCache->setCheckSignCallback(boost::bind(&FakePBFTEngine::checkSign, this, _1));
     }
     void updateConsensusNodeList() override {}
     void fakeUpdateConsensusNodeList() { return PBFTEngine::updateConsensusNodeList(); }
@@ -75,7 +76,7 @@ public:
     const std::shared_ptr<PBFTReqCache> reqCache() const { return m_reqCache; }
     TimeManager const& timeManager() const { return m_timeManager; }
     TimeManager& mutableTimeManager() { return m_timeManager; }
-    const std::shared_ptr<dev::db::LevelDB> backupDB() const { return m_backupDB; }
+    const std::shared_ptr<dev::storage::BasicRocksDB> backupDB() const { return m_backupDB; }
     int64_t consensusBlockNumber() const { return m_consensusBlockNumber; }
     void setConsensusBlockNumber(int64_t const& number) { m_consensusBlockNumber = number; }
 
@@ -98,6 +99,7 @@ public:
         header.setGasUsed(u256(0));
     }
 
+    void registerDisconnectHandler() override { return PBFTEngine::registerDisconnectHandler(); }
 
     void resetBlock(Block& block)
     {
@@ -107,22 +109,22 @@ public:
 
     IDXTYPE f() const { return m_f; }
     PBFTMsgQueue& mutableMsgQueue() { return m_msgQueue; }
-    void onRecvPBFTMessage(
-        NetworkException exception, std::shared_ptr<P2PSession> session, P2PMessage::Ptr message)
+    void onRecvPBFTMessage(NetworkException exception, std::shared_ptr<P2PSession> session,
+        P2PMessage::Ptr message) override
     {
         PBFTEngine::onRecvPBFTMessage(exception, session, message);
     }
 
-    P2PMessage::Ptr transDataToMessageWrapper(bytesConstRef data, PACKET_TYPE const& packetType,
-        PROTOCOL_ID const& protocolId, unsigned const& ttl)
+    P2PMessage::Ptr transDataToMessageWrapper(
+        bytesConstRef data, PACKET_TYPE const& packetType, unsigned const& ttl)
     {
-        return PBFTEngine::transDataToMessage(data, packetType, protocolId, ttl);
+        return PBFTEngine::transDataToMessage(data, packetType, ttl);
     }
-    bool broadcastMsgWrapper(unsigned const& packetType, std::string const& key, bytesConstRef data,
-        std::unordered_set<h512> const& filter = std::unordered_set<h512>(),
+    bool broadcastMsgWrapper(unsigned const& packetType, PBFTMsg const& _pbftMsg,
+        bytesConstRef data, std::unordered_set<h512> const& filter = std::unordered_set<h512>(),
         unsigned const& ttl = 0)
     {
-        return PBFTEngine::broadcastMsg(packetType, key, data, 0, filter, ttl);
+        return PBFTEngine::broadcastMsg(packetType, _pbftMsg, data, 0, filter, ttl);
     }
 
     bool broadcastFilter(h512 const& nodeId, unsigned const& packetType, std::string const& key)
@@ -144,6 +146,7 @@ public:
         return ret;
     }
     std::shared_ptr<P2PInterface> mutableService() { return m_service; }
+
     std::shared_ptr<BlockChainInterface> blockChain() { return m_blockChain; }
     std::shared_ptr<TxPoolInterface> txPool() { return m_txPool; }
     bool broadcastSignReq(PrepareReq const& req) { return PBFTEngine::broadcastSignReq(req); }
@@ -190,7 +193,7 @@ public:
     bool broadcastCommitReq(PrepareReq const& req) { return PBFTEngine::broadcastCommitReq(req); }
     bool broadcastViewChangeReq() { return PBFTEngine::broadcastViewChangeReq(); }
     void checkTimeout() { return PBFTEngine::checkTimeout(); }
-    void checkAndChangeView() { return PBFTEngine::checkAndChangeView(); }
+    bool checkAndChangeView(VIEWTYPE const& _view) { return PBFTEngine::checkAndChangeView(_view); }
     CheckResult isValidPrepare(PrepareReq const& req) const
     {
         std::ostringstream oss;
@@ -213,20 +216,33 @@ public:
     }
 
     void notifySealing(dev::eth::Block const& block) { return PBFTEngine::notifySealing(block); }
-    bool handlePrepareMsg(PrepareReq const& prepareReq, std::string const& ip = "self")
+    bool handlePrepareMsg(PrepareReq::Ptr prepareReq, std::string const& ip = "self")
     {
         return PBFTEngine::handlePrepareMsg(prepareReq, ip);
     }
+
+    void setEnablePrepareWithTxsHash(bool const& _enablePrepareWithTxsHash)
+    {
+        m_enablePrepareWithTxsHash = _enablePrepareWithTxsHash;
+    }
+
+    std::shared_ptr<PBFTReqCache> reqCache() { return m_reqCache; }
+
+    PrepareReq::Ptr wrapperConstructPrepareReq(dev::eth::Block::Ptr _block)
+    {
+        return PBFTEngine::constructPrepareReq(_block);
+    }
+
     void setOmitEmpty(bool value) { m_omitEmptyBlock = value; }
 
     /// handle sign
-    bool handleSignMsg(SignReq& sign_req, PBFTMsgPacket const& pbftMsg)
+    bool handleSignMsg(SignReq::Ptr sign_req, PBFTMsgPacket const& pbftMsg)
     {
         return PBFTEngine::handleSignMsg(sign_req, pbftMsg);
     }
 
     /// handle viewchange
-    bool handleViewChangeMsg(ViewChangeReq& viewChange_req, PBFTMsgPacket const& pbftMsg)
+    bool handleViewChangeMsg(ViewChangeReq::Ptr viewChange_req, PBFTMsgPacket const& pbftMsg)
     {
         return PBFTEngine::handleViewChangeMsg(viewChange_req, pbftMsg);
     }
@@ -234,15 +250,17 @@ public:
     CheckResult isValidSignReq(SignReq const& req) const
     {
         std::ostringstream oss;
-        return PBFTEngine::isValidSignReq(req, oss);
+        SignReq::Ptr signReq = std::make_shared<SignReq>(req);
+        return PBFTEngine::isValidSignReq(signReq, oss);
     }
     CheckResult isValidCommitReq(CommitReq const& req) const
     {
         std::ostringstream oss;
-        return PBFTEngine::isValidCommitReq(req, oss);
+        CommitReq::Ptr commitReq = std::make_shared<CommitReq>(req);
+        return PBFTEngine::isValidCommitReq(commitReq, oss);
     }
 
-    bool handleCommitMsg(CommitReq& commit_req, PBFTMsgPacket const& pbftMsg)
+    bool handleCommitMsg(CommitReq::Ptr commit_req, PBFTMsgPacket const& pbftMsg)
     {
         return PBFTEngine::handleCommitMsg(commit_req, pbftMsg);
     }
@@ -257,6 +275,19 @@ public:
 
     bool notifyNextLeaderSeal() { return m_notifyNextLeaderSeal; }
     IDXTYPE getNextLeader() const { return PBFTEngine::getNextLeader(); }
+    void setKeyPair(KeyPair const& _keyPair) { m_keyPair = _keyPair; }
+
+    PartiallyPBFTReqCache::Ptr partiallyReqCache() { return m_partiallyPrepareCache; }
+
+    void wrapperHandleP2PMessage(dev::p2p::NetworkException _exception,
+        std::shared_ptr<dev::p2p::P2PSession> _session, dev::p2p::P2PMessage::Ptr _message)
+    {
+        return PBFTEngine::handleP2PMessage(_exception, _session, _message);
+    }
+    bool wrapperGetNodeIDByIndex(dev::network::NodeID& nodeId, const IDXTYPE& idx) const
+    {
+        return PBFTEngine::getNodeIDByIndex(nodeId, idx);
+    }
 };
 
 template <typename T>
@@ -266,13 +297,27 @@ public:
     FakeConsensus(size_t sealerSize, PROTOCOL_ID protocolID,
         std::shared_ptr<SyncInterface> sync = std::make_shared<FakeBlockSync>(),
         std::shared_ptr<BlockVerifierInterface> blockVerifier =
-            std::make_shared<FakeBlockverifier>(),
-        std::shared_ptr<TxPoolFixture> txpool_creator = std::make_shared<TxPoolFixture>(5, 5))
+            std::make_shared<FakeBlockverifier>())
     {
-        m_consensus = std::make_shared<T>(txpool_creator->m_topicService, txpool_creator->m_txPool,
-            txpool_creator->m_blockChain, sync, blockVerifier, protocolID, m_sealerList);
+        txPoolCreator = std::make_shared<TxPoolFixture>(5, 5);
+        m_consensus = std::make_shared<T>(txPoolCreator->m_topicService, txPoolCreator->m_txPool,
+            txPoolCreator->m_blockChain, sync, blockVerifier, protocolID, m_sealerList);
+        m_consensus->registerDisconnectHandler();
+        fakeSync = std::dynamic_pointer_cast<FakeBlockSync>(sync);
         /// fake sealerList
         FakeSealerList(sealerSize);
+        resetSessionInfo();
+    }
+
+    FakeConsensus(PROTOCOL_ID protocolID, dev::h512s const& _sealerList,
+        std::shared_ptr<BlockVerifierInterface> _blockVerifier,
+        std::shared_ptr<BlockChainInterface> _blockChain, KeyPair const& _keyPair)
+      : m_sealerList(_sealerList)
+    {
+        txPoolCreator = std::make_shared<TxPoolFixture>(5, 5);
+        fakeSync = std::make_shared<FakeBlockSync>();
+        m_consensus = std::make_shared<T>(txPoolCreator->m_topicService, txPoolCreator->m_txPool,
+            _blockChain, fakeSync, _blockVerifier, protocolID, _sealerList, _keyPair);
         resetSessionInfo();
     }
 
@@ -282,13 +327,20 @@ public:
         service->clearSessionInfo();
         for (size_t i = 0; i < m_sealerList.size(); i++)
         {
-            NodeIPEndpoint m_endpoint(bi::address::from_string("127.0.0.1"), 30303);
+            NodeIPEndpoint m_endpoint(bi::make_address("127.0.0.1"), 30303);
             dev::network::NodeInfo node_info;
             node_info.nodeID = m_sealerList[i];
             std::set<dev::TopicItem> topicList;
             P2PSessionInfo info(node_info, m_endpoint, topicList);
             service->appendSessionInfo(info);
         }
+    }
+
+    void setKeyPair(std::vector<KeyPair> const& _keyPair) { m_keyPair = _keyPair; }
+
+    void setNodeID2KeyPair(std::map<dev::h512, KeyPair> const& _nodeID2KeyPair)
+    {
+        m_nodeID2KeyPair = _nodeID2KeyPair;
     }
 
     /// fake sealer list
@@ -300,6 +352,8 @@ public:
             KeyPair key_pair = KeyPair::create();
             m_sealerList.push_back(key_pair.pub());
             m_secrets.push_back(key_pair.secret());
+            m_keyPair.push_back(key_pair);
+            m_nodeID2KeyPair[key_pair.pub()] = key_pair;
             m_consensus->appendSealer(key_pair.pub());
         }
     }
@@ -308,6 +362,10 @@ public:
 public:
     h512s m_sealerList;
     std::vector<Secret> m_secrets;
+    std::vector<KeyPair> m_keyPair;
+    std::map<dev::h512, KeyPair> m_nodeID2KeyPair;
+    std::shared_ptr<TxPoolFixture> txPoolCreator;
+    std::shared_ptr<FakeBlockSync> fakeSync;
 
 private:
     std::shared_ptr<T> m_consensus;

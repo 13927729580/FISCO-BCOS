@@ -19,10 +19,12 @@
 
 #include "TransactionReceipt.h"
 #include <libdevcore/FixedHash.h>
+#include <libdevcore/Guards.h>
 #include <libdevcore/RLP.h>
 #include <libdevcrypto/Common.h>
-#include <libdevcrypto/Hash.h>
+#include <libdevcrypto/CryptoInterface.h>
 #include <libethcore/Common.h>
+#include <tbb/concurrent_unordered_set.h>
 #include <boost/optional.hpp>
 
 
@@ -52,7 +54,9 @@ const int c_fieldCountRC2WithOutSig = 10;
 const int c_sigCount = 3;
 
 /// function called after the transaction has been submitted
-using RPCCallback = std::function<void(LocalisedTransactionReceipt::Ptr, dev::bytesConstRef input)>;
+class Block;
+using RPCCallback = std::function<void(LocalisedTransactionReceipt::Ptr, dev::bytesConstRef input,
+    std::shared_ptr<dev::eth::Block> _blockPtr)>;
 /// Encodes a transaction, ready to be exported to or freshly imported from RLP.
 class Transaction
 {
@@ -104,6 +108,9 @@ public:
     explicit Transaction(bytes const& _rlp, CheckTransaction _checkSig)
       : Transaction(&_rlp, _checkSig)
     {}
+    Transaction(Transaction const&) = delete;
+
+    Transaction& operator=(Transaction const&) = delete;
 
     /// Checks equality of transactions.
     bool operator==(Transaction const& _c) const
@@ -124,10 +131,6 @@ public:
     /// Force the sender to a particular value. This will result in an invalid
     /// transaction RLP.
     void forceSender(Address const& _a) { m_sender = _a; }
-
-    /// @throws TransactionIsUnsigned if signature was not initialized
-    /// @throws InvalidSValue if the signature has an invalid S value.
-    void checkLowS() const;
 
     /// @returns true if transaction is non-null.
     explicit operator bool() const { return m_type != NullTransaction; }
@@ -154,8 +157,8 @@ public:
         return out;
     }
 
-    /// @returns the SHA3 hash of the RLP serialisation of this transaction.
-    h256 sha3(IncludeSignature _sig = WithSignature) const;
+    /// @returns the hash of the RLP serialisation of this transaction.
+    h256 hash(IncludeSignature _sig = WithSignature) const;
 
     /// @returns the amount of ETH to be transferred by this (message-call)
     /// transaction, in Wei. Synonym for endowment().
@@ -212,16 +215,20 @@ public:
     void setImportTime(u256 _t) { m_importTime = _t; }
 
     /// @returns true if the transaction was signed
-    bool hasSignature() const { return m_vrs.is_initialized(); }
+    bool hasSignature() const { return (bool)m_vrs; }
 
     /// @returns true if the transaction was signed with zero signature
     bool hasZeroSignature() const { return m_vrs && isZeroSignature(m_vrs->r, m_vrs->s); }
 
+    u256 const& chainId() { return m_chainId; }
+    u256 const& groupId() { return m_groupId; }
+    dev::bytes const& extraData() { return m_extraData; }
+
     /// @returns the signature of the transaction (the signature has the sender
     /// encoded in it)
     /// @throws TransactionIsUnsigned if signature was not initialized
-    SignatureStruct const& signature() const;
-    void updateSignature(boost::optional<SignatureStruct> const& sig)
+    std::shared_ptr<crypto::Signature> const& signature() const;
+    void updateSignature(std::shared_ptr<crypto::Signature> sig)
     {
         m_vrs = sig;
         m_hashWith = h256(0);
@@ -238,19 +245,48 @@ public:
     static int64_t baseGasRequired(
         bool _contractCreation, bytesConstRef _data, EVMSchedule const& _es);
 
-    void setRpcCallback(RPCCallback callBack) { m_rpcCallback = callBack; }
-    RPCCallback rpcCallback() const { return m_rpcCallback; }
-    void triggerRpcCallback(LocalisedTransactionReceipt::Ptr pReceipt) const;
-
-    void updateTransactionHashWithSig(dev::h256 const& txHash);
-
     bool checkChainId(u256 _chainId);
     bool checkGroupId(u256 _groupId);
+
+    void setRpcCallback(RPCCallback callBack);
+    RPCCallback rpcCallback() const;
 
     void setRpcTx(bool const& _rpcTx) { m_rpcTx = _rpcTx; }
     bool rpcTx() { return m_rpcTx; }
 
-protected:
+    void setSynced(bool const& _synced) { m_synced = _synced; }
+    bool synced() const { return m_synced; }
+
+    int64_t capacity() { return (m_data.size() + m_rlpBuffer.size() + m_extraData.size()); }
+
+    // Note: Provide for node transaction generation
+    void setReceiveAddress(Address const& _receiveAddr)
+    {
+        m_hashWith = h256(0);
+        m_rlpBuffer = bytes();
+        m_receiveAddress = _receiveAddr;
+    }
+    void setData(std::shared_ptr<dev::bytes const> _dataPtr)
+    {
+        m_hashWith = h256(0);
+        m_rlpBuffer = bytes();
+        m_data = *_dataPtr;
+    }
+
+    void setChainId(u256 const& _chainId)
+    {
+        m_hashWith = h256(0);
+        m_rlpBuffer = bytes();
+        m_chainId = _chainId;
+    }
+
+    void setGroupId(u256 const& _groupId)
+    {
+        m_hashWith = h256(0);
+        m_rlpBuffer = bytes();
+        m_groupId = _groupId;
+    }
+
     /// Type of transaction.
     enum Type
     {
@@ -260,7 +296,50 @@ protected:
         MessageCall        ///< Transaction to invoke a message call - receiveAddress() is
                            ///< used.
     };
+    void setType(Type const& _type)
+    {
+        m_hashWith = h256(0);
+        m_rlpBuffer = bytes();
+        m_type = _type;
+    }
+    Type const& type() { return m_type; }
 
+    void appendNodeContainsTransaction(dev::h512 const& _node)
+    {
+        WriteGuard l(x_nodeListWithTheTransaction);
+        m_nodeListWithTheTransaction.insert(_node);
+    }
+
+    template <typename T>
+    void appendNodeListContainTransaction(T const& _nodeList)
+    {
+        WriteGuard l(x_nodeListWithTheTransaction);
+        for (auto const& node : _nodeList)
+        {
+            m_nodeListWithTheTransaction.insert(node);
+        }
+    }
+
+    bool isTheNodeContainsTransaction(dev::h512 const& _node)
+    {
+        ReadGuard l(x_nodeListWithTheTransaction);
+        return m_nodeListWithTheTransaction.count(_node);
+    }
+    bool isKnownBySomeone()
+    {
+        ReadGuard l(x_nodeListWithTheTransaction);
+        return !m_nodeListWithTheTransaction.empty();
+    }
+
+    void clearNodeTransactionMarker()
+    {
+        WriteGuard l(x_nodeListWithTheTransaction);
+        m_nodeListWithTheTransaction.clear();
+    }
+
+    std::shared_ptr<crypto::Signature> vrs() { return m_vrs; }
+
+protected:
     static bool isZeroSignature(u256 const& _r, u256 const& _s) { return !_r && !_s; }
 
     void encodeRC1(bytes& _trans, IncludeSignature _sig = WithSignature) const;
@@ -271,7 +350,7 @@ protected:
     /// Clears the signature.
     void clearSignature()
     {
-        m_vrs = SignatureStruct();
+        m_vrs.reset();
         m_sender = Address();
     }
 
@@ -290,10 +369,10 @@ protected:
                    ///< unused gas gets refunded once the contract is ended.
     bytes m_data;  ///< The data associated with the transaction, or the
                    ///< initialiser if it's a creation transaction.
-    boost::optional<SignatureStruct> m_vrs;  ///< The signature of the transaction.
-                                             ///< Encodes the sender.
-    mutable h256 m_hashWith;                 ///< Cached hash of transaction with signature.
-    mutable Address m_sender;                ///< Cached sender, determined from signature.
+    std::shared_ptr<crypto::Signature> m_vrs;  ///< The signature of the transaction.
+                                               ///< Encodes the sender.
+    mutable h256 m_hashWith;                   ///< Cached hash of transaction with signature.
+    mutable Address m_sender;                  ///< Cached sender, determined from signature.
     u256 m_blockLimit;            ///< The latest block number to be packaged for transaction.
     u256 m_importTime = u256(0);  ///< The utc time at which a transaction enters the queue.
 
@@ -307,6 +386,12 @@ protected:
     bytes m_extraData;  /// < Reserved fields, distinguished by "##".
     // used to represent that the transaction is received from rpc
     bool m_rpcTx = false;
+    // Whether the transaction has been synchronized
+    bool m_synced = false;
+    // Record the list of nodes containing the transaction and provide related query interfaces.
+    mutable dev::SharedMutex x_nodeListWithTheTransaction;
+    // Record the node where the transaction exists
+    std::set<dev::h512> m_nodeListWithTheTransaction;
 };
 
 /// Nice name for vector of Transaction.
@@ -315,7 +400,7 @@ using Transactions = std::vector<Transaction::Ptr>;
 /// Simple human-readable stream-shift operator.
 inline std::ostream& operator<<(std::ostream& _out, Transaction const& _t)
 {
-    _out << _t.sha3().abridged() << "{";
+    _out << _t.hash().abridged() << "{";
     if (_t.receiveAddress())
         _out << _t.receiveAddress().abridged();
     else
@@ -327,15 +412,23 @@ inline std::ostream& operator<<(std::ostream& _out, Transaction const& _t)
     return _out;
 }
 
-class LocalisedTransaction : public Transaction
+class LocalisedTransaction
 {
 public:
     typedef std::shared_ptr<LocalisedTransaction> Ptr;
 
     LocalisedTransaction() {}
-    LocalisedTransaction(Transaction const& _t, h256 const& _blockHash, unsigned _transactionIndex,
+    LocalisedTransaction(
+        h256 const& _blockHash, unsigned _transactionIndex, BlockNumber _blockNumber = 0)
+      : m_tx(std::make_shared<Transaction>()),
+        m_blockHash(_blockHash),
+        m_transactionIndex(_transactionIndex),
+        m_blockNumber(_blockNumber)
+    {}
+
+    LocalisedTransaction(Transaction::Ptr _tx, h256 const& _blockHash, unsigned _transactionIndex,
         BlockNumber _blockNumber = 0)
-      : Transaction(_t),
+      : m_tx(_tx),
         m_blockHash(_blockHash),
         m_transactionIndex(_transactionIndex),
         m_blockNumber(_blockNumber)
@@ -344,8 +437,10 @@ public:
     h256 const& blockHash() const { return m_blockHash; }
     unsigned transactionIndex() const { return m_transactionIndex; }
     BlockNumber blockNumber() const { return m_blockNumber; }
+    Transaction::Ptr tx() { return m_tx; }
 
 private:
+    Transaction::Ptr m_tx;
     h256 m_blockHash;
     unsigned m_transactionIndex;
     BlockNumber m_blockNumber;

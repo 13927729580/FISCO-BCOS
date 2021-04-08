@@ -75,13 +75,19 @@ public:
         memoryTableFactory = context->getMemoryTableFactory();
         parallelConfigPrecompiled = std::dynamic_pointer_cast<ParallelConfigPrecompiled>(
             context->getPrecompiled(Address(0x1006)));
+
+        auto precompiledGasFactory = std::make_shared<dev::precompiled::PrecompiledGasFactory>(0);
+        auto precompiledExecResultFactory =
+            std::make_shared<dev::precompiled::PrecompiledExecResultFactory>();
+        precompiledExecResultFactory->setPrecompiledGasFactory(precompiledGasFactory);
+        parallelConfigPrecompiled->setPrecompiledExecResultFactory(precompiledExecResultFactory);
     };
 
     virtual ~ParallelConfigPrecompiledFixture(){};
 
     bytes callPrecompiled(bytesConstRef _param)
     {
-        return parallelConfigPrecompiled->call(context, _param, Address(0x12345));
+        return (parallelConfigPrecompiled->call(context, _param, Address(0x12345)))->execResult();
     }
 
     bool hasRegistered(const Address& _address, const string& _functionName)
@@ -89,7 +95,7 @@ public:
         auto tableName = PARA_CONFIG_TABLE_PREFIX + _address.hex() + "_";
         if (g_BCOSConfig.version() >= V2_2_0)
         {
-            tableName = std::string("c_" + _address.hex());
+            tableName = PARA_CONFIG_TABLE_PREFIX_SHORT + _address.hex();
         }
         Table::Ptr table = memoryTableFactory->openTable(tableName);
         if (!table)

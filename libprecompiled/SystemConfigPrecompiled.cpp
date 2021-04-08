@@ -38,18 +38,15 @@ SystemConfigPrecompiled::SystemConfigPrecompiled()
     name2Selector[SYSCONFIG_METHOD_SET_STR] = getFuncSelector(SYSCONFIG_METHOD_SET_STR);
 }
 
-bytes SystemConfigPrecompiled::call(
-    ExecutiveContext::Ptr context, bytesConstRef param, Address const& origin)
+PrecompiledExecResult::Ptr SystemConfigPrecompiled::call(
+    ExecutiveContext::Ptr context, bytesConstRef param, Address const& origin, Address const&)
 {
-    PRECOMPILED_LOG(TRACE) << LOG_BADGE("SystemConfigPrecompiled") << LOG_DESC("call")
-                           << LOG_KV("param", toHex(param));
-
     // parse function name
     uint32_t func = getParamFunc(param);
     bytesConstRef data = getParamData(param);
 
     dev::eth::ContractABI abi;
-    bytes out;
+    auto callResult = m_precompiledExecResultFactory->createPrecompiledResult();
     int count = 0;
     int result = 0;
     if (func == name2Selector[SYSCONFIG_METHOD_SET_STR])
@@ -66,11 +63,10 @@ bytes SystemConfigPrecompiled::call(
         if (!checkValueValid(configKey, configValue))
         {
             PRECOMPILED_LOG(DEBUG)
-                << LOG_BADGE("SystemConfigPrecompiled")
-                << LOG_DESC("SystemConfigPrecompiled set invalid value")
+                << LOG_BADGE("SystemConfigPrecompiled") << LOG_DESC("set invalid value")
                 << LOG_KV("configKey", configKey) << LOG_KV("configValue", configValue);
-            getErrorCodeOut(out, CODE_INVALID_CONFIGURATION_VALUES);
-            return out;
+            getErrorCodeOut(callResult->mutableExecResult(), CODE_INVALID_CONFIGURATION_VALUES);
+            return callResult;
         }
 
         storage::Table::Ptr table = openTable(context, SYS_CONFIG);
@@ -122,37 +118,58 @@ bytes SystemConfigPrecompiled::call(
         PRECOMPILED_LOG(ERROR) << LOG_BADGE("SystemConfigPrecompiled")
                                << LOG_DESC("call undefined function") << LOG_KV("func", func);
     }
-    getErrorCodeOut(out, result);
-    return out;
+    getErrorCodeOut(callResult->mutableExecResult(), result);
+    return callResult;
 }
 
 bool SystemConfigPrecompiled::checkValueValid(std::string const& key, std::string const& value)
 {
+    int64_t configuredValue = 0;
+    try
+    {
+        configuredValue = boost::lexical_cast<int64_t>(value);
+    }
+    catch (std::exception const& e)
+    {
+        PRECOMPILED_LOG(ERROR) << LOG_BADGE("SystemConfigPrecompiled")
+                               << LOG_DESC("checkValueValid failed") << LOG_KV("key", key)
+                               << LOG_KV("value", value) << LOG_KV("errorInfo", e.what());
+        return false;
+    }
     if (SYSTEM_KEY_TX_COUNT_LIMIT == key)
     {
-        try
-        {
-            return (boost::lexical_cast<uint64_t>(value) >= TX_COUNT_LIMIT_MIN);
-        }
-        catch (boost::bad_lexical_cast& e)
-        {
-            PRECOMPILED_LOG(ERROR) << LOG_BADGE(e.what());
-            return false;
-        }
+        return (configuredValue >= TX_COUNT_LIMIT_MIN);
     }
     else if (SYSTEM_KEY_TX_GAS_LIMIT == key)
     {
-        try
+        return (configuredValue >= TX_GAS_LIMIT_MIN);
+    }
+    else if (SYSTEM_KEY_RPBFT_EPOCH_SEALER_NUM == key)
+    {
+        return (configuredValue >= RPBFT_EPOCH_SEALER_NUM_MIN);
+    }
+    else if (SYSTEM_KEY_RPBFT_EPOCH_BLOCK_NUM == key)
+    {
+        if (g_BCOSConfig.version() < V2_6_0)
         {
-            return (boost::lexical_cast<uint64_t>(value) >= TX_GAS_LIMIT_MIN);
+            return (configuredValue >= RPBFT_EPOCH_BLOCK_NUM_MIN);
         }
-        catch (boost::bad_lexical_cast& e)
+        else
         {
-            PRECOMPILED_LOG(ERROR) << LOG_BADGE(e.what());
-            return false;
+            // epoch_block_num is at least 2 when supported_version >= v2.6.0
+            return (configuredValue > RPBFT_EPOCH_BLOCK_NUM_MIN);
         }
     }
-    // only can insert tx_count_limit and tx_gas_limit
-    // as system config
+    else if (SYSTEM_KEY_CONSENSUS_TIMEOUT == key)
+    {
+        if (g_BCOSConfig.version() < V2_6_0)
+        {
+            return false;
+        }
+        return (configuredValue >= SYSTEM_CONSENSUS_TIMEOUT_MIN &&
+                configuredValue < SYSTEM_CONSENSUS_TIMEOUT_MAX);
+    }
+    // only can insert tx_count_limit and tx_gas_limit, rpbft_epoch_sealer_num,
+    // rpbft_epoch_block_num as system config
     return false;
 }

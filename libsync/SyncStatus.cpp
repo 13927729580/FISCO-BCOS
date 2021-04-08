@@ -37,9 +37,9 @@ bool SyncMasterStatus::hasPeer(NodeID const& _id)
     return m_peersStatus.count(_id);
 }
 
-bool SyncMasterStatus::newSyncPeerStatus(SyncPeerInfo const& _info)
+bool SyncMasterStatus::newSyncPeerStatus(SyncStatusPacket::Ptr _info)
 {
-    if (hasPeer(_info.nodeId))
+    if (hasPeer(_info->nodeId))
     {
         SYNC_LOG(WARNING) << LOG_BADGE("Status")
                           << LOG_DESC("Peer status is exist, no need to create");
@@ -111,6 +111,10 @@ std::shared_ptr<SyncPeerStatus> SyncMasterStatus::peerStatus(NodeID const& _id)
 NodeIDs SyncMasterStatus::filterPeers(int64_t const& _neighborSize, std::shared_ptr<NodeIDs> _peers,
     std::function<bool(std::shared_ptr<SyncPeerStatus>)> const& _allow)
 {
+    if (_neighborSize == 0)
+    {
+        return NodeIDs();
+    }
     int64_t selectedSize = _peers->size();
     if (selectedSize > _neighborSize)
     {

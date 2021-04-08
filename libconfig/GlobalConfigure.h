@@ -35,13 +35,17 @@ enum VERSION : uint32_t
     V2_0_0 = 0x02000000,
     V2_1_0 = 0x02010000,
     V2_2_0 = 0x02020000,
+    V2_3_0 = 0x02030000,
+    V2_4_0 = 0x02040000,
+    V2_5_0 = 0x02050000,
+    V2_6_0 = 0x02060000,
+    V2_7_0 = 0x02070000,
 };
 
 enum ProtocolVersion : uint32_t
 {
     v1 = 1,
     v2 = 2,
-    // TODO: update SDK protocol to V3 after sdk-2.1.1 released
     v3 = 3,
     maxVersion = v3,
     minVersion = v1,
@@ -74,6 +78,18 @@ public:
     void setEVMSchedule(dev::eth::EVMSchedule const& _schedule) { m_evmSchedule = _schedule; }
     dev::eth::EVMSchedule const& evmSchedule() const { return m_evmSchedule; }
 
+    void setConfDir(std::string _confDir) { m_confDir = _confDir; }
+    const std::string& confDir() { return m_confDir; }
+    void setDataDir(std::string _dataDir) { m_dataDir = _dataDir; }
+    const std::string& dataDir() { return m_dataDir; }
+
+    void setEnableStat(bool _enableStat) { m_enableStat = _enableStat; }
+
+    bool const& enableStat() const { return m_enableStat; }
+
+    void setUseSMCrypto(bool _useSMCrypto) { m_useSMCrypto = _useSMCrypto; }
+    bool SMCrypto() const { return m_useSMCrypto; }
+
     struct DiskEncryption
     {
         bool enable = false;
@@ -98,9 +114,16 @@ public:
     const bool c_omitEmptyBlock = true;
     /// default blockLimit
     const unsigned c_blockLimit = 1000;
+    /// vote valid in 10 * c_blockLimit blocks
+    const unsigned c_voteValidLimit = c_blockLimit * 10;
     /// default compress threshold: 1KB
     const uint64_t c_compressThreshold = 1024;
     const uint64_t c_binaryLogSize = 128 * 1024 * 1024;
+    // the max block size: 20MB
+    // the max permits size(for network bandwidth limit), default is 20MB
+    // default compressRate is 4.0
+    const double c_compressRate = 4.0;
+    const uint64_t c_maxPermitsSize = 20 * 1024 * 1024 / c_compressRate;
 
     std::atomic_bool shouldExit;
 
@@ -110,6 +133,10 @@ private:
     int64_t m_chainId = 1;
     std::string m_supportedVersion;
     dev::eth::EVMSchedule m_evmSchedule = dev::eth::DefaultSchedule;
+    std::string m_confDir;
+    std::string m_dataDir;
+    bool m_enableStat;
+    bool m_useSMCrypto;
 };
 
 #define g_BCOSConfig GlobalConfigure::instance()

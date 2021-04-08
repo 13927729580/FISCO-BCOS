@@ -85,6 +85,7 @@ private:
     bool m_force = false;
     bool m_deleted = false;
     ssize_t m_capacity = 0;
+    ssize_t m_capacityOfHashField = 0;
 
     EntryData::Ptr m_data;
 
@@ -106,6 +107,8 @@ public:
     virtual void setID(const std::string& id);
 
     virtual std::string getField(const std::string& key) const;
+    virtual bool fieldExist(std::string const& _key) const;
+    virtual bytes getFieldBytes(const std::string& key) const;
     virtual bytesConstRef getFieldConst(const std::string& key) const;
 
     virtual void setField(const std::string& key, const std::string& value);
@@ -140,6 +143,7 @@ public:
     virtual void setDeleted(bool deleted);
 
     virtual ssize_t capacity() const;
+    virtual ssize_t capacityOfHashField() const;
 
     virtual void copyFrom(Entry::ConstPtr entry);
 
@@ -342,7 +346,7 @@ public:
     {
         m_recorder = _recorder;
     }
-
+    virtual bool dirty() const { return m_dataDirty; }
     virtual void setStateStorage(std::shared_ptr<Storage> _db) { m_remoteDB = _db; }
     virtual void setBlockHash(h256 const& _blockHash) { m_blockHash = _blockHash; }
     virtual void setBlockNum(int64_t _blockNum) { m_blockNum = _blockNum; }
@@ -357,6 +361,8 @@ protected:
     TableInfo::Ptr m_tableInfo;
     h256 m_blockHash;
     int64_t m_blockNum = 0;
+    bool m_hashDirty = false;  // mark if m_hash need to re-calculate
+    bool m_dataDirty = false;  // mark if table has data to commit
 };
 
 // Block execution time construction by TableFactoryFactory
